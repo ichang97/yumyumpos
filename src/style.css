@@ -1,0 +1,95 @@
+@import "@fontsource/noto-sans-thai/400.css";
+@import "@fontsource/noto-sans-thai/500.css";
+@import "@fontsource/noto-sans-thai/600.css";
+@import "@fontsource/noto-sans-thai/700.css";
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Noto Sans Thai", system-ui, -apple-system, sans-serif;
+  --color-brand: #EA580C;
+  --color-brand-dark: #C2410C;
+  --color-brand-soft: #FFF7ED;
+  --color-surface: #FAF9F6;
+}
+
+@layer base {
+  html,
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--color-surface);
+    color: #1c1917;
+  }
+
+  button,
+  a,
+  [role="button"] {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.pb-safe {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+.print-only {
+  display: none;
+}
+
+@media print {
+  @page {
+    margin: 4mm;
+    size: auto;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+    color: #000000;
+  }
+
+  .print-slip {
+    width: 100%;
+    max-width: 72mm;
+    margin: 0 auto;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .print-poster {
+    width: 100%;
+    max-width: 140mm;
+    margin: 12mm auto;
+    text-align: center;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+
+  .receipt-divider {
+    border-top: 1px dashed #000000;
+    margin: 6px 0;
+  }
+}

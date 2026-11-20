@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "yumyum-pos",
+  "main": "./worker/index.js",
+  "compatibility_date": "2026-11-20",
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "yumyum-pos-db",
+      "database_id": "6d75e805-7050-42a2-8418-76008a4b07eb",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
