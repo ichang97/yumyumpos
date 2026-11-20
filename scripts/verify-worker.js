@@ -88,6 +88,10 @@ async function main() {
       env.DB,
       path.resolve(process.cwd(), 'migrations/0005_kitchen_station_items.sql')
     );
+    await applySqlFile(
+      env.DB,
+      path.resolve(process.cwd(), 'migrations/0006_atomic_daily_counters.sql')
+    );
 
     assert.equal(
       buildPromptPayPayload('0000000000'),
@@ -818,7 +822,178 @@ async function main() {
     });
     console.log('PASS 14: Kitchen station filtering, per-item status aggregation, and independent completion verified');
 
-    console.log('\nALL 14 VERIFICATION CHECKS PASSED!');
+    const concurrentRequests = Array.from({ length: 15 }, (_, idx) => {
+      if (idx % 2 === 0) {
+        return request(env, '/api/orders', {
+          method: 'POST',
+          body: {
+            order_type: idx % 4 === 0 ? 'dine_in' : 'takeaway',
+            staff_name: 'มาร์ค',
+            customer_name: `ลูกค้า-${idx + 1}`,
+            pay_now: true,
+            payment_method: 'cash',
+            received_amount: 100,
+            items: [
+              {
+                is_custom: false,
+                menu_id: noodlePork.id,
+                option_ids: [optSmall, optTomyum],
+                quantity: 1,
+                note: `โน้ต-${idx + 1}`,
+              },
+            ],
+          },
+        });
+      }
+      return request(env, '/api/public/orders', {
+        method: 'POST',
+        body: {
+          order_type: 'takeaway',
+          customer_name: `QR-${idx + 1}`,
+          payment_method: 'transfer',
+          items: [
+            {
+              menu_id: kaphrao.id,
+              option_ids: [optCrispyPork, optFriedEgg],
+              quantity: 1,
+            },
+          ],
+        },
+      });
+    });
+
+    const concurrentResults = await Promise.all(concurrentRequests);
+    assert.ok(concurrentResults.every((r) => r.status === 201));
+    const concurrentQueueNos = concurrentResults
+      .map((r) => r.data.order.queue_no)
+      .sort((a, b) => a - b);
+    assert.deepEqual(
+      concurrentQueueNos,
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    );
+    assert.ok(
+      concurrentResults.every(
+        (r) =>
+          Array.isArray(r.data.order.items) &&
+          r.data.order.items.length === 1 &&
+          Array.isArray(r.data.order.items[0].options) &&
+          r.data.order.items[0].options.length === 2
+      )
+    );
+
+    const multiStationRes = await request(env, '/api/orders', {
+      method: 'POST',
+      body: {
+        order_type: 'dine_in',
+        staff_name: 'มาร์ค',
+        pay_now: true,
+        payment_method: 'cash',
+        received_amount: 200,
+        items: [
+          {
+            is_custom: false,
+            menu_id: noodlePork.id,
+            option_ids: [optSmall, optTomyum],
+            quantity: 1,
+          },
+          {
+            is_custom: false,
+            menu_id: kaphrao.id,
+            option_ids: [optCrispyPork],
+            quantity: 1,
+          },
+          {
+            is_custom: false,
+            menu_id: water.id,
+            option_ids: [],
+            quantity: 1,
+          },
+        ],
+      },
+    });
+    assert.equal(multiStationRes.status, 201);
+    const multiId = multiStationRes.data.order.id;
+
+    const parallelStationPatches = await Promise.all([
+      request(env, `/api/orders/${multiId}/kitchen-status`, {
+        method: 'PATCH',
+        body: { kitchen_status: 'ready', category_id: noodleCatId },
+      }),
+      request(env, `/api/orders/${multiId}/kitchen-status`, {
+        method: 'PATCH',
+        body: { kitchen_status: 'ready', category_id: stirFryCatId },
+      }),
+      request(env, `/api/orders/${multiId}/kitchen-status`, {
+        method: 'PATCH',
+        body: { kitchen_status: 'ready', category_id: drinkCatId },
+      }),
+    ]);
+    assert.ok(parallelStationPatches.every((r) => r.status === 200));
+
+    const finalMultiOrder = await request(env, `/api/orders/${multiId}`);
+    assert.equal(finalMultiOrder.status, 200);
+    assert.equal(finalMultiOrder.data.order.kitchen_status, 'ready');
+    assert.ok(finalMultiOrder.data.order.ready_at);
+
+    const unpaidDoublePayTarget = await request(env, '/api/orders', {
+      method: 'POST',
+      body: {
+        order_type: 'takeaway',
+        staff_name: 'มาร์ค',
+        pay_now: false,
+        items: [
+          {
+            is_custom: false,
+            menu_id: water.id,
+            option_ids: [],
+            quantity: 1,
+          },
+        ],
+      },
+    });
+    assert.equal(unpaidDoublePayTarget.status, 201);
+
+    const parallelPays = await Promise.all([
+      request(env, `/api/orders/${unpaidDoublePayTarget.data.order.id}/pay`, {
+        method: 'POST',
+        body: { payment_method: 'cash', received_amount: 20 },
+      }),
+      request(env, `/api/orders/${unpaidDoublePayTarget.data.order.id}/pay`, {
+        method: 'POST',
+        body: { payment_method: 'cash', received_amount: 20 },
+      }),
+    ]);
+    const payStatuses = parallelPays.map((r) => r.status).sort((a, b) => a - b);
+    assert.deepEqual(payStatuses, [200, 409]);
+
+    await request(env, '/api/orders/clear-all', {
+      method: 'POST',
+      body: { confirm: 'CLEAR_ALL' },
+    });
+
+    const postClearSeqRes = await request(env, '/api/orders', {
+      method: 'POST',
+      body: {
+        order_type: 'takeaway',
+        staff_name: 'มาร์ค',
+        pay_now: true,
+        payment_method: 'cash',
+        received_amount: 20,
+        items: [
+          {
+            is_custom: false,
+            menu_id: water.id,
+            option_ids: [],
+            quantity: 1,
+          },
+        ],
+      },
+    });
+    assert.equal(postClearSeqRes.status, 201);
+    assert.equal(postClearSeqRes.data.order.queue_no, 1);
+    console.log('PASS 15: Concurrency stress test (15 parallel orders, 3 parallel stations, double-pay guard) verified');
+
+    console.log('\nALL 15 VERIFICATION CHECKS PASSED!');
   } finally {
     await proxy.dispose();
     cleanupState();
