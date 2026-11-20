@@ -33,8 +33,14 @@ import {
   speakThai,
   stopSpeech,
 } from '../utils/kitchenSpeech.js';
+import {
+  buildStationOrders,
+  countActiveByStation,
+  hasCustomStationItems,
+} from '../utils/kitchenStation.js';
 
 const SPEECH_RATE_STORAGE_KEY = 'yumyum_kitchen_speech_rate';
+const STATION_STORAGE_KEY = 'yumyum_kitchen_station';
 
 function loadSavedSpeechRate() {
   try {
@@ -45,8 +51,24 @@ function loadSavedSpeechRate() {
   }
 }
 
+function loadSavedStation() {
+  try {
+    const saved = localStorage.getItem(STATION_STORAGE_KEY);
+    if (!saved || saved === 'all' || saved === 'custom') {
+      return saved || 'all';
+    }
+    return /^\d+$/.test(saved) ? saved : 'all';
+  } catch {
+    return 'all';
+  }
+}
+
 const props = defineProps({
   orders: {
+    type: Array,
+    default: () => [],
+  },
+  categories: {
     type: Array,
     default: () => [],
   },
@@ -63,6 +85,7 @@ const props = defineProps({
 const emit = defineEmits(['refresh', 'updateKitchenStatus', 'checkoutOrder', 'printOrder']);
 
 const mobileColumn = ref('pending');
+const selectedStation = ref(loadSavedStation());
 const soundEnabled = ref(false);
 const speechRate = ref(loadSavedSpeechRate());
 const nowMs = ref(Date.now());
@@ -188,23 +211,135 @@ function toggleSound() {
   }
 }
 
+function selectStation(stationKey) {
+  const key = String(stationKey || 'all');
+  selectedStation.value = key;
+  try {
+    localStorage.setItem(STATION_STORAGE_KEY, key);
+  } catch {
+  }
+}
+
+watch(
+  () => props.categories,
+  (cats) => {
+    if (
+      Array.isArray(cats) &&
+      cats.length > 0 &&
+      selectedStation.value !== 'all' &&
+      selectedStation.value !== 'custom' &&
+      !cats.some((cat) => String(cat.id) === selectedStation.value)
+    ) {
+      selectStation('all');
+    }
+  },
+  { immediate: true }
+);
+
+const stationTabs = computed(() => {
+  const tabs = [
+    {
+      key: 'all',
+      label: 'ทั้งหมด',
+      count: countActiveByStation(props.orders, 'all'),
+    },
+  ];
+  for (const cat of props.categories || []) {
+    const key = String(cat.id);
+    tabs.push({
+      key,
+      label: cat.name,
+      count: countActiveByStation(props.orders, key),
+    });
+  }
+  if (hasCustomStationItems(props.orders) || selectedStation.value === 'custom') {
+    tabs.push({
+      key: 'custom',
+      label: 'เมนูเอง',
+      count: countActiveByStation(props.orders, 'custom'),
+    });
+  }
+  return tabs;
+});
+
+const activeStationCategoryParam = computed(() => {
+  if (selectedStation.value === 'all') {
+    return null;
+  }
+  if (selectedStation.value === 'custom') {
+    return 'custom';
+  }
+  return Number(selectedStation.value);
+});
+
+function emitKitchenStatus(orderId, kitchenStatus) {
+  emit('updateKitchenStatus', orderId, kitchenStatus, activeStationCategoryParam.value);
+}
+
+function hasMixedItemStatuses(order) {
+  const items = Array.isArray(order?.items) ? order.items : [];
+  if (items.length <= 1) {
+    return false;
+  }
+  const unique = new Set(items.map((i) => i.kitchen_status || 'pending'));
+  return unique.size > 1;
+}
+
+function itemStatusLabel(status) {
+  if (status === 'cooking') {
+    return 'กำลังทำ';
+  }
+  if (status === 'ready') {
+    return 'เสร็จแล้ว';
+  }
+  if (status === 'completed') {
+    return 'ส่งแล้ว';
+  }
+  return 'รอทำ';
+}
+
+function itemStatusClass(status) {
+  if (status === 'cooking') {
+    return 'bg-sky-100 text-sky-800';
+  }
+  if (status === 'ready') {
+    return 'bg-emerald-100 text-emerald-800';
+  }
+  if (status === 'completed') {
+    return 'bg-stone-200 text-stone-700';
+  }
+  return 'bg-orange-100 text-brand-dark';
+}
+
+const stationOrders = computed(() => buildStationOrders(props.orders, selectedStation.value));
+
 const pendingOrders = computed(() =>
-  props.orders.filter((o) => o.kitchen_status === 'pending')
+  stationOrders.value.filter((o) => o.kitchen_status === 'pending')
 );
 
 const cookingOrders = computed(() =>
-  props.orders.filter((o) => o.kitchen_status === 'cooking')
+  stationOrders.value.filter((o) => o.kitchen_status === 'cooking')
 );
 
 const readyOrders = computed(() =>
-  props.orders.filter((o) => o.kitchen_status === 'ready')
+  stationOrders.value.filter((o) => o.kitchen_status === 'ready')
 );
 
+let lastWatchedStation = selectedStation.value;
+
 watch(
-  () => props.orders,
-  (list) => {
+  [selectedStation, stationOrders],
+  ([station, list]) => {
     const nextList = Array.isArray(list) ? list : [];
     const nextStatusMap = new Map(nextList.map((o) => [o.id, o.kitchen_status]));
+    if (station !== lastWatchedStation) {
+      lastWatchedStation = station;
+      handleStopSpeech();
+      announcedOrderIds.value = new Set();
+      prevStatusById.value = nextStatusMap;
+      initializedOrders.value = true;
+      return;
+    }
     if (!initializedOrders.value) {
       prevStatusById.value = nextStatusMap;
       initializedOrders.value = true;
@@ -320,6 +455,36 @@ const columns = computed(() => [
       </div>
     </div>
 
+    <div class="bg-white border-b border-stone-200 px-3 md:px-4 py-2 flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0">
+      <span class="text-xs font-bold text-stone-500 mr-1 shrink-0">Station:</span>
+      <button
+        v-for="tab in stationTabs"
+        :key="tab.key"
+        type="button"
+        class="min-h-9 px-3 rounded-full text-xs font-bold whitespace-nowrap flex items-center gap-1.5 border transition shrink-0"
+        :class="
+          selectedStation === tab.key
+            ? 'bg-brand border-brand text-white shadow-2xs'
+            : 'bg-stone-50 border-stone-200 text-stone-700 hover:bg-stone-100'
+        "
+        @click="selectStation(tab.key)"
+      >
+        <span>{{ tab.label }}</span>
+        <span
+          class="px-1.5 py-0.5 rounded-full text-[11px] tabular-nums"
+          :class="
+            selectedStation === tab.key
+              ? 'bg-white text-brand'
+              : tab.count > 0
+                ? 'bg-orange-100 text-brand-dark'
+                : 'bg-stone-200/80 text-stone-500'
+          "
+        >
+          {{ tab.count }}
+        </span>
+      </button>
+    </div>
+
     <div class="md:hidden bg-white border-b border-stone-200 px-3 py-2 grid grid-cols-3 gap-1.5 shrink-0">
       <button
         v-for="col in columns"
@@ -389,6 +554,12 @@ const columns = computed(() => [
                     <span>QR</span>
                   </span>
                   <span
+                    v-if="selectedStation !== 'all' && order.total_item_count > order.items.length"
+                    class="px-2 py-0.5 rounded-full bg-orange-100 text-brand-dark text-[11px] font-bold tabular-nums"
+                  >
+                    {{ order.items.length }}/{{ order.total_item_count }} รายการ
+                  </span>
+                  <span
                     class="px-2 py-0.5 rounded-full text-[11px] font-bold"
                     :class="
                       order.status === 'paid'
@@ -437,9 +608,29 @@ const columns = computed(() => [
                 :key="item.id"
                 class="space-y-0.5"
               >
-                <div class="font-bold text-stone-900 text-sm md:text-base leading-snug">
-                  <span class="text-brand mr-1 tabular-nums">{{ item.quantity }}x</span>
-                  <span>{{ item.menu_name }}</span>
+                <div class="flex items-start justify-between gap-2">
+                  <div class="font-bold text-stone-900 text-sm md:text-base leading-snug">
+                    <span class="text-brand mr-1 tabular-nums">{{ item.quantity }}x</span>
+                    <span>{{ item.menu_name }}</span>
+                  </div>
+                  <div
+                    v-if="selectedStation === 'all'"
+                    class="flex items-center gap-1 shrink-0 pt-0.5"
+                  >
+                    <span
+                      v-if="item.category_name"
+                      class="px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 text-[10px] font-semibold"
+                    >
+                      {{ item.category_name }}
+                    </span>
+                    <span
+                      v-if="hasMixedItemStatuses(order)"
+                      class="px-1.5 py-0.5 rounded text-[10px] font-bold"
+                      :class="itemStatusClass(item.kitchen_status)"
+                    >
+                      {{ itemStatusLabel(item.kitchen_status) }}
+                    </span>
+                  </div>
                 </div>
                 <p v-if="item.options.length > 0" class="text-xs text-stone-600 pl-5">
                   {{ item.options.map((o) => o.option_name).join(', ') }}
@@ -459,7 +650,7 @@ const columns = computed(() => [
                   type="button"
                   :disabled="updatingId === order.id"
                   class="flex-1 min-h-11 px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs md:text-sm flex items-center justify-center gap-1.5 disabled:opacity-50"
-                  @click="$emit('updateKitchenStatus', order.id, 'cooking')"
+                  @click="emitKitchenStatus(order.id, 'cooking')"
                 >
                   <span>เริ่มทำ</span>
                   <ArrowRight class="w-4 h-4" />
@@ -468,7 +659,7 @@ const columns = computed(() => [
                   type="button"
                   :disabled="updatingId === order.id"
                   class="min-h-11 px-3 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs md:text-sm flex items-center justify-center gap-1 disabled:opacity-50"
-                  @click="$emit('updateKitchenStatus', order.id, 'ready')"
+                  @click="emitKitchenStatus(order.id, 'ready')"
                 >
                   <Check class="w-4 h-4" />
                   <span>เสร็จเลย</span>
@@ -501,7 +692,7 @@ const columns = computed(() => [
                   type="button"
                   :disabled="updatingId === order.id"
                   class="min-h-11 px-3 rounded-xl border border-stone-200 bg-stone-50 hover:bg-stone-100 text-stone-700 font-bold text-xs flex items-center justify-center gap-1 disabled:opacity-50"
-                  @click="$emit('updateKitchenStatus', order.id, 'pending')"
+                  @click="emitKitchenStatus(order.id, 'pending')"
                 >
                   <ArrowLeft class="w-4 h-4" />
                   <span>รอทำ</span>
@@ -510,7 +701,7 @@ const columns = computed(() => [
                   type="button"
                   :disabled="updatingId === order.id"
                   class="flex-1 min-h-11 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs md:text-sm flex items-center justify-center gap-1.5 disabled:opacity-50"
-                  @click="$emit('updateKitchenStatus', order.id, 'ready')"
+                  @click="emitKitchenStatus(order.id, 'ready')"
                 >
                   <Check class="w-4 h-4" />
                   <span>ทำเสร็จแล้ว</span>
@@ -552,7 +743,7 @@ const columns = computed(() => [
                   type="button"
                   :disabled="updatingId === order.id"
                   class="flex-1 min-h-11 px-3 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs md:text-sm flex items-center justify-center gap-1.5 disabled:opacity-50"
-                  @click="$emit('updateKitchenStatus', order.id, 'completed')"
+                  @click="emitKitchenStatus(order.id, 'completed')"
                 >
                   <CheckCheck class="w-4 h-4" />
                   <span>ส่งมอบแล้ว</span>

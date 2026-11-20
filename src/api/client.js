@@ -68,11 +68,21 @@ export const api = {
   getKitchenOrders: () => apiFetch('/kitchen'),
   getOrder: (id) => apiFetch(`/orders/${id}`),
   createOrder: (payload) => apiFetch('/orders', { method: 'POST', body: payload }),
-  updateKitchenStatus: (id, kitchenStatus) =>
-    apiFetch(`/orders/${id}/kitchen-status`, {
+  updateKitchenStatus: (id, kitchenStatus, categoryId = null) => {
+    const body = { kitchen_status: kitchenStatus };
+    if (
+      categoryId !== null &&
+      categoryId !== undefined &&
+      categoryId !== '' &&
+      categoryId !== 'all'
+    ) {
+      body.category_id = categoryId;
+    }
+    return apiFetch(`/orders/${id}/kitchen-status`, {
       method: 'PATCH',
-      body: { kitchen_status: kitchenStatus },
-    }),
+      body,
+    });
+  },
   payOrder: (id, payload) => apiFetch(`/orders/${id}/pay`, { method: 'POST', body: payload }),
   cancelOrder: (id, cancelReason) =>
     apiFetch(`/orders/${id}/cancel`, {

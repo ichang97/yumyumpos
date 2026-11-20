@@ -293,10 +293,10 @@ function closeCheckoutModal() {
   paidOrder.value = null;
 }
 
-async function handleUpdateKitchenStatus(orderId, kitchenStatus) {
+async function handleUpdateKitchenStatus(orderId, kitchenStatus, categoryId = null) {
   updatingKitchenId.value = orderId;
   try {
-    await api.updateKitchenStatus(orderId, kitchenStatus);
+    await api.updateKitchenStatus(orderId, kitchenStatus, categoryId);
     await refreshAll();
   } catch (err) {
     showToast({ type: 'error', text: err.message });
@@ -378,6 +378,7 @@ async function handlePrintQrPoster(poster) {
       <KitchenView
         v-else-if="activeTab === 'kitchen'"
         :orders="kitchenOrders"
+        :categories="catalog.categories"
         :loading="loadingKitchen"
         :updating-id="updatingKitchenId"
         @refresh="refreshKitchen"
