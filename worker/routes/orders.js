@@ -4,6 +4,7 @@ import {
   ORDER_COLUMNS,
   computePaymentFields,
   createCounterOrder,
+  deriveOrderKitchenStatus,
   getOrderById,
   hydrateOrders,
 } from '../lib/orderService.js';
@@ -145,23 +146,66 @@ export function createOrdersRoutes() {
       throw new HttpError(409, 'กรุณายืนยันการชำระเงินก่อนส่งคิวเข้าครัว');
     }
 
+    let stationFilter = null;
+    if (
+      body.category_id !== undefined &&
+      body.category_id !== null &&
+      body.category_id !== '' &&
+      body.category_id !== 'all'
+    ) {
+      if (body.category_id === 'custom') {
+        stationFilter = 'custom';
+      } else {
+        stationFilter = requireInt(Number(body.category_id), 'รหัสหมวดหมู่', 1);
+      }
+    }
+
+    let orderNextStatus = nextStatus;
+    if (stationFilter === null) {
+      await execute(
+        c.env.DB,
+        'UPDATE order_items SET kitchen_status = ? WHERE order_id = ?',
+        [nextStatus, orderId]
+      );
+    } else {
+      if (stationFilter === 'custom') {
+        await execute(
+          c.env.DB,
+          'UPDATE order_items SET kitchen_status = ? WHERE order_id = ? AND category_id IS NULL',
+          [nextStatus, orderId]
+        );
+      } else {
+        await execute(
+          c.env.DB,
+          'UPDATE order_items SET kitchen_status = ? WHERE order_id = ? AND category_id = ?',
+          [nextStatus, orderId, stationFilter]
+        );
+      }
+      const itemRows = await queryAll(
+        c.env.DB,
+        'SELECT kitchen_status FROM order_items WHERE order_id = ?',
+        [orderId]
+      );
+      orderNextStatus = deriveOrderKitchenStatus(itemRows.map((r) => r.kitchen_status));
+    }
+
     const now = getBangkokNow();
     let cookingStartedAt = existing.cooking_started_at;
     let readyAt = existing.ready_at;
     let completedAt = null;
 
-    if (nextStatus === 'pending') {
+    if (orderNextStatus === 'pending') {
       readyAt = null;
       completedAt = null;
-    } else if (nextStatus === 'cooking') {
+    } else if (orderNextStatus === 'cooking') {
       cookingStartedAt = existing.cooking_started_at || now;
       readyAt = null;
       completedAt = null;
-    } else if (nextStatus === 'ready') {
+    } else if (orderNextStatus === 'ready') {
       cookingStartedAt = existing.cooking_started_at || now;
       readyAt = existing.ready_at || now;
       completedAt = null;
-    } else if (nextStatus === 'completed') {
+    } else if (orderNextStatus === 'completed') {
       cookingStartedAt = existing.cooking_started_at || now;
       readyAt = existing.ready_at || now;
       completedAt = now;
@@ -176,7 +220,7 @@ export function createOrdersRoutes() {
         ready_at = ?,
         completed_at = ?
       WHERE id = ?`,
-      [nextStatus, cookingStartedAt, readyAt, completedAt, orderId]
+      [orderNextStatus, cookingStartedAt, readyAt, completedAt, orderId]
     );
 
     const updated = await getOrderById(c.env.DB, orderId);
@@ -238,6 +282,12 @@ export function createOrdersRoutes() {
       throw new HttpError(409, 'บิลนี้ถูกชำระเงินหรือยกเลิกไปแล้ว');
     }
 
+    await execute(
+      c.env.DB,
+      "UPDATE order_items SET kitchen_status = 'pending' WHERE order_id = ?",
+      [orderId]
+    );
+
     const updated = await getOrderById(c.env.DB, orderId);
     return c.json({ order: updated });
   });
@@ -267,6 +317,12 @@ export function createOrdersRoutes() {
     if (!meta.changes) {
       throw new HttpError(409, 'บิลนี้ถูกยกเลิกไปแล้ว');
     }
+
+    await execute(
+      c.env.DB,
+      "UPDATE order_items SET kitchen_status = 'cancelled' WHERE order_id = ?",
+      [orderId]
+    );
 
     const updated = await getOrderById(c.env.DB, orderId);
     return c.json({ order: updated });

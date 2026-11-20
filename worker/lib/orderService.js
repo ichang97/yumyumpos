@@ -34,6 +34,25 @@ export const ORDER_COLUMNS = `
   completed_at
 `;
 
+export function deriveOrderKitchenStatus(itemStatuses) {
+  const active = (Array.isArray(itemStatuses) ? itemStatuses : []).filter(
+    (s) => s && s !== 'cancelled'
+  );
+  if (active.length === 0) {
+    return 'pending';
+  }
+  if (active.every((s) => s === 'completed')) {
+    return 'completed';
+  }
+  if (active.every((s) => s === 'ready' || s === 'completed')) {
+    return 'ready';
+  }
+  if (active.some((s) => s === 'cooking' || s === 'ready' || s === 'completed')) {
+    return 'cooking';
+  }
+  return 'pending';
+}
+
 export async function hydrateOrders(db, orderRows) {
   if (!orderRows || orderRows.length === 0) {
     return [];
@@ -47,6 +66,9 @@ export async function hydrateOrders(db, orderRows) {
         id,
         order_id,
         menu_id,
+        category_id,
+        category_name,
+        kitchen_status,
         menu_name,
         base_price,
         options_price,
@@ -155,6 +177,8 @@ export function sanitizePublicOrder(order) {
     items: (order.items || []).map((item) => ({
       id: item.id,
       menu_name: item.menu_name,
+      category_name: item.category_name,
+      kitchen_status: item.kitchen_status,
       unit_price: item.unit_price,
       quantity: item.quantity,
       line_total: item.line_total,
@@ -201,6 +225,9 @@ export async function resolveOrderItems(
       const lineTotal = Math.round(unitPrice * quantity * 100) / 100;
       resolved.push({
         menu_id: null,
+        category_id: null,
+        category_name: 'เมนูเอง',
+        kitchen_status: 'pending',
         menu_name: menuName,
         base_price: basePrice,
         options_price: 0,
@@ -217,7 +244,10 @@ export async function resolveOrderItems(
     const menuId = requireInt(Number(rawItem.menu_id), 'รหัสเมนู', 1);
     const menu = await queryFirst(
       db,
-      'SELECT id, category_id, name, base_price, is_available FROM menus WHERE id = ?',
+      `SELECT m.id, m.category_id, c.name AS category_name, m.name, m.base_price, m.is_available
+      FROM menus m
+      LEFT JOIN categories c ON c.id = m.category_id
+      WHERE m.id = ?`,
       [menuId]
     );
     if (!menu) {
@@ -309,6 +339,9 @@ export async function resolveOrderItems(
 
     resolved.push({
       menu_id: menu.id,
+      category_id: menu.category_id,
+      category_name: menu.category_name || null,
+      kitchen_status: 'pending',
       menu_name: menu.name,
       base_price: menu.base_price,
       options_price: optionsPrice,
@@ -331,6 +364,9 @@ export async function insertResolvedItems(db, orderId, resolvedItems) {
       `INSERT INTO order_items (
         order_id,
         menu_id,
+        category_id,
+        category_name,
+        kitchen_status,
         menu_name,
         base_price,
         options_price,
@@ -339,10 +375,13 @@ export async function insertResolvedItems(db, orderId, resolvedItems) {
         line_total,
         note,
         is_custom
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         orderId,
         item.menu_id,
+        item.category_id ?? null,
+        item.category_name ?? null,
+        item.kitchen_status || 'pending',
         item.menu_name,
         item.base_price,
         item.options_price,
