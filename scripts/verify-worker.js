@@ -8,6 +8,7 @@ import {
   normalizeSpeechRate,
   resolveNextOrderToAnnounce,
 } from '../src/utils/kitchenSpeech.js';
+import { buildStationOrders, countActiveByStation } from '../src/utils/kitchenStation.js';
 import { buildPromptPayPayload } from '../src/utils/promptpay.js';
 import { app } from '../worker/index.js';
 
@@ -82,6 +83,10 @@ async function main() {
     await applySqlFile(
       env.DB,
       path.resolve(process.cwd(), 'migrations/0004_shop_payment_settings.sql')
+    );
+    await applySqlFile(
+      env.DB,
+      path.resolve(process.cwd(), 'migrations/0005_kitchen_station_items.sql')
     );
 
     assert.equal(
@@ -702,7 +707,118 @@ async function main() {
     assert.equal(resetOrderRes.data.order.queue_no, 1);
     console.log('PASS 13: Clear all orders & queues resets queue to Q001 while preserving catalog & settings');
 
-    console.log('\nALL 13 VERIFICATION CHECKS PASSED!');
+    await request(env, '/api/orders/clear-all', {
+      method: 'POST',
+      body: { confirm: 'CLEAR_ALL' },
+    });
+
+    const stationOrderRes = await request(env, '/api/orders', {
+      method: 'POST',
+      body: {
+        order_type: 'dine_in',
+        staff_name: 'มาร์ค',
+        pay_now: true,
+        payment_method: 'cash',
+        received_amount: 200,
+        items: [
+          {
+            is_custom: false,
+            menu_id: noodlePork.id,
+            option_ids: [optSmall, optTomyum],
+            quantity: 1,
+          },
+          {
+            is_custom: false,
+            menu_id: kaphrao.id,
+            option_ids: [optCrispyPork],
+            quantity: 1,
+          },
+          {
+            is_custom: false,
+            menu_id: water.id,
+            option_ids: [],
+            quantity: 1,
+          },
+        ],
+      },
+    });
+    assert.equal(stationOrderRes.status, 201);
+    const stationOrder = stationOrderRes.data.order;
+    const noodleCatId = noodlePork.category_id;
+    const stirFryCatId = kaphrao.category_id;
+    const drinkCatId = water.category_id;
+
+    assert.equal(stationOrder.items[0].category_id, noodleCatId);
+    assert.equal(stationOrder.items[0].category_name, 'ก๋วยเตี๋ยว');
+    assert.equal(stationOrder.items[0].kitchen_status, 'pending');
+    assert.equal(stationOrder.items[1].category_id, stirFryCatId);
+    assert.equal(stationOrder.items[2].category_id, drinkCatId);
+
+    const kitchenStationFetch = await request(env, '/api/kitchen');
+    assert.equal(kitchenStationFetch.status, 200);
+    assert.equal(countActiveByStation(kitchenStationFetch.data.orders, String(noodleCatId)), 1);
+    assert.equal(countActiveByStation(kitchenStationFetch.data.orders, String(stirFryCatId)), 1);
+    assert.equal(countActiveByStation(kitchenStationFetch.data.orders, String(drinkCatId)), 1);
+
+    const noodleOrdersBefore = buildStationOrders(kitchenStationFetch.data.orders, String(noodleCatId));
+    assert.equal(noodleOrdersBefore.length, 1);
+    assert.equal(noodleOrdersBefore[0].items.length, 1);
+    assert.equal(noodleOrdersBefore[0].items[0].menu_name, 'ก๋วยเตี๋ยวหมู');
+    assert.equal(noodleOrdersBefore[0].total_item_count, 3);
+
+    const drinkReadyRes = await request(env, `/api/orders/${stationOrder.id}/kitchen-status`, {
+      method: 'PATCH',
+      body: { kitchen_status: 'ready', category_id: drinkCatId },
+    });
+    assert.equal(drinkReadyRes.status, 200);
+    assert.equal(drinkReadyRes.data.order.kitchen_status, 'cooking');
+    assert.equal(drinkReadyRes.data.order.items[2].kitchen_status, 'ready');
+    assert.equal(drinkReadyRes.data.order.items[0].kitchen_status, 'pending');
+    assert.equal(drinkReadyRes.data.order.items[1].kitchen_status, 'pending');
+
+    const drinkReadyView = buildStationOrders([drinkReadyRes.data.order], String(drinkCatId));
+    const noodleStillPendingView = buildStationOrders([drinkReadyRes.data.order], String(noodleCatId));
+    assert.equal(drinkReadyView[0].kitchen_status, 'ready');
+    assert.equal(noodleStillPendingView[0].kitchen_status, 'pending');
+
+    const noodleReadyRes = await request(env, `/api/orders/${stationOrder.id}/kitchen-status`, {
+      method: 'PATCH',
+      body: { kitchen_status: 'ready', category_id: noodleCatId },
+    });
+    assert.equal(noodleReadyRes.status, 200);
+    assert.equal(noodleReadyRes.data.order.kitchen_status, 'cooking');
+
+    const stirFryReadyRes = await request(env, `/api/orders/${stationOrder.id}/kitchen-status`, {
+      method: 'PATCH',
+      body: { kitchen_status: 'ready', category_id: stirFryCatId },
+    });
+    assert.equal(stirFryReadyRes.status, 200);
+    assert.equal(stirFryReadyRes.data.order.kitchen_status, 'ready');
+
+    const drinkDoneRes = await request(env, `/api/orders/${stationOrder.id}/kitchen-status`, {
+      method: 'PATCH',
+      body: { kitchen_status: 'completed', category_id: drinkCatId },
+    });
+    assert.equal(drinkDoneRes.status, 200);
+    assert.equal(drinkDoneRes.data.order.kitchen_status, 'ready');
+    assert.equal(buildStationOrders([drinkDoneRes.data.order], String(drinkCatId)).length, 0);
+    assert.equal(buildStationOrders([drinkDoneRes.data.order], String(noodleCatId)).length, 1);
+
+    const allDoneRes = await request(env, `/api/orders/${stationOrder.id}/kitchen-status`, {
+      method: 'PATCH',
+      body: { kitchen_status: 'completed' },
+    });
+    assert.equal(allDoneRes.status, 200);
+    assert.equal(allDoneRes.data.order.kitchen_status, 'completed');
+    assert.ok(allDoneRes.data.order.items.every((i) => i.kitchen_status === 'completed'));
+
+    await request(env, '/api/orders/clear-all', {
+      method: 'POST',
+      body: { confirm: 'CLEAR_ALL' },
+    });
+    console.log('PASS 14: Kitchen station filtering, per-item status aggregation, and independent completion verified');
+
+    console.log('\nALL 14 VERIFICATION CHECKS PASSED!');
   } finally {
     await proxy.dispose();
     cleanupState();
