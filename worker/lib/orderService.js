@@ -1,4 +1,4 @@
-import { execute, prepareStmt, queryAll, queryByIdChunks, queryFirst } from './db.js';
+import { prepareStmt, queryAll, queryByIdChunks, queryFirst } from './db.js';
 import { getBangkokDate, getBangkokNow } from './time.js';
 import {
   HttpError,
@@ -357,86 +357,21 @@ export async function resolveOrderItems(
   return resolved;
 }
 
-export async function insertResolvedItems(db, orderId, resolvedItems) {
-  const itemStmts = resolvedItems.map((item) =>
-    prepareStmt(
-      db,
-      `INSERT INTO order_items (
-        order_id,
-        menu_id,
-        category_id,
-        category_name,
-        kitchen_status,
-        menu_name,
-        base_price,
-        options_price,
-        unit_price,
-        quantity,
-        line_total,
-        note,
-        is_custom
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        orderId,
-        item.menu_id,
-        item.category_id ?? null,
-        item.category_name ?? null,
-        item.kitchen_status || 'pending',
-        item.menu_name,
-        item.base_price,
-        item.options_price,
-        item.unit_price,
-        item.quantity,
-        item.line_total,
-        item.note,
-        item.is_custom,
-      ]
-    )
-  );
-
-  const itemResults = await db.batch(itemStmts);
-  const optionStmts = [];
-
-  for (let i = 0; i < resolvedItems.length; i += 1) {
-    const itemId = itemResults[i]?.meta?.last_row_id;
-    for (const opt of resolvedItems[i].options) {
-      optionStmts.push(
-        prepareStmt(
-          db,
-          `INSERT INTO order_item_options (
-            order_item_id,
-            option_group_name,
-            option_name,
-            price_delta
-          ) VALUES (?, ?, ?, ?)`,
-          [itemId, opt.option_group_name, opt.option_name, opt.price_delta]
-        )
-      );
-    }
-  }
-
-  if (optionStmts.length > 0) {
-    await db.batch(optionStmts);
-  }
+function formatOrderNo(bangkokDate, seq) {
+  const compact = bangkokDate.replace(/-/g, '').slice(2);
+  return `${compact}-${String(seq).padStart(4, '0')}`;
 }
 
-async function generateOrderNo(db, bangkokDate, offset = 0) {
-  const compact = bangkokDate.replace(/-/g, '').slice(2);
-  const prefix = `${compact}-`;
-  const lastOrder = await queryFirst(
+async function nextDailySequence(db, bangkokDate) {
+  const row = await queryFirst(
     db,
-    'SELECT order_no FROM orders WHERE order_no LIKE ? ORDER BY id DESC LIMIT 1',
-    [`${prefix}%`]
+    `INSERT INTO daily_counters (counter_date, last_seq)
+    VALUES (?, 1)
+    ON CONFLICT(counter_date) DO UPDATE SET last_seq = last_seq + 1
+    RETURNING last_seq`,
+    [bangkokDate]
   );
-  let seq = 1;
-  if (lastOrder && lastOrder.order_no) {
-    const parts = lastOrder.order_no.split('-');
-    const prev = Number(parts[1]);
-    if (Number.isInteger(prev) && prev >= 1) {
-      seq = prev + 1;
-    }
-  }
-  return `${prefix}${String(seq + offset).padStart(4, '0')}`;
+  return Number(row?.last_seq || 1);
 }
 
 export function computePaymentFields(subtotal, body) {
@@ -533,75 +468,111 @@ export async function createCounterOrder(
     paidAt = now;
   }
 
-  let orderId = null;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const [maxQueueRow, orderNo] = await Promise.all([
-      queryFirst(
-        db,
-        'SELECT COALESCE(MAX(queue_no), 0) AS max_q FROM orders WHERE queue_date = ?',
-        [today]
-      ),
-      generateOrderNo(db, today, attempt),
-    ]);
-    const queueNo = (maxQueueRow?.max_q || 0) + 1 + attempt;
+  const seq = await nextDailySequence(db, today);
+  const queueNo = seq;
+  const orderNo = formatOrderNo(today, seq);
 
-    try {
-      const meta = await execute(
+  const stmts = [
+    prepareStmt(
+      db,
+      `INSERT INTO orders (
+        order_no,
+        queue_no,
+        queue_date,
+        order_type,
+        table_id,
+        table_name,
+        source,
+        kitchen_status,
+        customer_name,
+        tracking_token,
+        staff_name,
+        status,
+        subtotal,
+        discount_amount,
+        total_amount,
+        payment_method,
+        received_amount,
+        change_amount,
+        cancel_reason,
+        created_at,
+        paid_at
+      ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+      [
+        orderNo,
+        queueNo,
+        today,
+        orderType,
+        source,
+        customerName,
+        trackingToken,
+        staffName,
+        status,
+        subtotal,
+        discountAmount,
+        totalAmount,
+        paymentMethod,
+        receivedAmount,
+        changeAmount,
+        now,
+        paidAt,
+      ]
+    ),
+  ];
+
+  for (const item of resolvedItems) {
+    stmts.push(
+      prepareStmt(
         db,
-        `INSERT INTO orders (
-          order_no,
-          queue_no,
-          queue_date,
-          order_type,
-          table_id,
-          table_name,
-          source,
+        `INSERT INTO order_items (
+          order_id,
+          menu_id,
+          category_id,
+          category_name,
           kitchen_status,
-          customer_name,
-          tracking_token,
-          staff_name,
-          status,
-          subtotal,
-          discount_amount,
-          total_amount,
-          payment_method,
-          received_amount,
-          change_amount,
-          cancel_reason,
-          created_at,
-          paid_at
-        ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+          menu_name,
+          base_price,
+          options_price,
+          unit_price,
+          quantity,
+          line_total,
+          note,
+          is_custom
+        ) VALUES ((SELECT id FROM orders WHERE tracking_token = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          orderNo,
-          queueNo,
-          today,
-          orderType,
-          source,
-          customerName,
           trackingToken,
-          staffName,
-          status,
-          subtotal,
-          discountAmount,
-          totalAmount,
-          paymentMethod,
-          receivedAmount,
-          changeAmount,
-          now,
-          paidAt,
+          item.menu_id,
+          item.category_id ?? null,
+          item.category_name ?? null,
+          item.kitchen_status || 'pending',
+          item.menu_name,
+          item.base_price,
+          item.options_price,
+          item.unit_price,
+          item.quantity,
+          item.line_total,
+          item.note,
+          item.is_custom,
         ]
+      )
+    );
+
+    for (const opt of item.options) {
+      stmts.push(
+        prepareStmt(
+          db,
+          `INSERT INTO order_item_options (
+            order_item_id,
+            option_group_name,
+            option_name,
+            price_delta
+          ) VALUES ((SELECT MAX(id) FROM order_items WHERE order_id = (SELECT id FROM orders WHERE tracking_token = ?)), ?, ?, ?)`,
+          [trackingToken, opt.option_group_name, opt.option_name, opt.price_delta]
+        )
       );
-      orderId = meta.last_row_id;
-      break;
-    } catch (err) {
-      const msg = String(err?.message || '');
-      if ((msg.includes('orders.order_no') || msg.includes('orders.queue_date')) && attempt < 4) {
-        continue;
-      }
-      throw err;
     }
   }
 
-  await insertResolvedItems(db, orderId, resolvedItems);
-  return getOrderById(db, orderId);
+  await db.batch(stmts);
+  return getOrderByTrackingToken(db, trackingToken);
 }

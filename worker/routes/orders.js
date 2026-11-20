@@ -1,10 +1,9 @@
 import { Hono } from 'hono';
-import { execute, prepareStmt, queryAll, queryFirst } from '../lib/db.js';
+import { prepareStmt, queryAll, queryFirst } from '../lib/db.js';
 import {
   ORDER_COLUMNS,
   computePaymentFields,
   createCounterOrder,
-  deriveOrderKitchenStatus,
   getOrderById,
   hydrateOrders,
 } from '../lib/orderService.js';
@@ -79,6 +78,7 @@ export function createOrdersRoutes() {
       prepareStmt(c.env.DB, 'DELETE FROM order_item_options'),
       prepareStmt(c.env.DB, 'DELETE FROM order_items'),
       prepareStmt(c.env.DB, 'DELETE FROM orders'),
+      prepareStmt(c.env.DB, 'DELETE FROM daily_counters'),
     ]);
 
     return c.json({
@@ -160,68 +160,96 @@ export function createOrdersRoutes() {
       }
     }
 
-    let orderNextStatus = nextStatus;
+    const now = getBangkokNow();
+    const batchStmts = [];
+
     if (stationFilter === null) {
-      await execute(
-        c.env.DB,
-        'UPDATE order_items SET kitchen_status = ? WHERE order_id = ?',
-        [nextStatus, orderId]
+      batchStmts.push(
+        prepareStmt(
+          c.env.DB,
+          'UPDATE order_items SET kitchen_status = ? WHERE order_id = ?',
+          [nextStatus, orderId]
+        ),
+        prepareStmt(
+          c.env.DB,
+          `UPDATE orders
+          SET
+            kitchen_status = ?,
+            cooking_started_at = CASE
+              WHEN ? IN ('cooking', 'ready', 'completed') THEN COALESCE(cooking_started_at, ?)
+              ELSE cooking_started_at
+            END,
+            ready_at = CASE
+              WHEN ? IN ('ready', 'completed') THEN COALESCE(ready_at, ?)
+              ELSE NULL
+            END,
+            completed_at = CASE
+              WHEN ? = 'completed' THEN COALESCE(completed_at, ?)
+              ELSE NULL
+            END
+          WHERE id = ? AND status = 'paid'`,
+          [nextStatus, nextStatus, now, nextStatus, now, nextStatus, now, orderId]
+        )
       );
     } else {
       if (stationFilter === 'custom') {
-        await execute(
-          c.env.DB,
-          'UPDATE order_items SET kitchen_status = ? WHERE order_id = ? AND category_id IS NULL',
-          [nextStatus, orderId]
+        batchStmts.push(
+          prepareStmt(
+            c.env.DB,
+            'UPDATE order_items SET kitchen_status = ? WHERE order_id = ? AND category_id IS NULL',
+            [nextStatus, orderId]
+          )
         );
       } else {
-        await execute(
-          c.env.DB,
-          'UPDATE order_items SET kitchen_status = ? WHERE order_id = ? AND category_id = ?',
-          [nextStatus, orderId, stationFilter]
+        batchStmts.push(
+          prepareStmt(
+            c.env.DB,
+            'UPDATE order_items SET kitchen_status = ? WHERE order_id = ? AND category_id = ?',
+            [nextStatus, orderId, stationFilter]
+          )
         );
       }
-      const itemRows = await queryAll(
-        c.env.DB,
-        'SELECT kitchen_status FROM order_items WHERE order_id = ?',
-        [orderId]
+      batchStmts.push(
+        prepareStmt(
+          c.env.DB,
+          `UPDATE orders
+          SET kitchen_status = (
+            SELECT CASE
+              WHEN COUNT(id) = 0 THEN 'pending'
+              WHEN SUM(CASE WHEN kitchen_status != 'completed' THEN 1 ELSE 0 END) = 0 THEN 'completed'
+              WHEN SUM(CASE WHEN kitchen_status NOT IN ('ready', 'completed') THEN 1 ELSE 0 END) = 0 THEN 'ready'
+              WHEN SUM(CASE WHEN kitchen_status IN ('cooking', 'ready', 'completed') THEN 1 ELSE 0 END) > 0 THEN 'cooking'
+              ELSE 'pending'
+            END
+            FROM order_items
+            WHERE order_id = ? AND kitchen_status != 'cancelled'
+          )
+          WHERE id = ? AND status = 'paid'`,
+          [orderId, orderId]
+        ),
+        prepareStmt(
+          c.env.DB,
+          `UPDATE orders
+          SET
+            cooking_started_at = CASE
+              WHEN kitchen_status IN ('cooking', 'ready', 'completed') THEN COALESCE(cooking_started_at, ?)
+              ELSE cooking_started_at
+            END,
+            ready_at = CASE
+              WHEN kitchen_status IN ('ready', 'completed') THEN COALESCE(ready_at, ?)
+              ELSE NULL
+            END,
+            completed_at = CASE
+              WHEN kitchen_status = 'completed' THEN COALESCE(completed_at, ?)
+              ELSE NULL
+            END
+          WHERE id = ? AND status = 'paid'`,
+          [now, now, now, orderId]
+        )
       );
-      orderNextStatus = deriveOrderKitchenStatus(itemRows.map((r) => r.kitchen_status));
     }
 
-    const now = getBangkokNow();
-    let cookingStartedAt = existing.cooking_started_at;
-    let readyAt = existing.ready_at;
-    let completedAt = null;
-
-    if (orderNextStatus === 'pending') {
-      readyAt = null;
-      completedAt = null;
-    } else if (orderNextStatus === 'cooking') {
-      cookingStartedAt = existing.cooking_started_at || now;
-      readyAt = null;
-      completedAt = null;
-    } else if (orderNextStatus === 'ready') {
-      cookingStartedAt = existing.cooking_started_at || now;
-      readyAt = existing.ready_at || now;
-      completedAt = null;
-    } else if (orderNextStatus === 'completed') {
-      cookingStartedAt = existing.cooking_started_at || now;
-      readyAt = existing.ready_at || now;
-      completedAt = now;
-    }
-
-    await execute(
-      c.env.DB,
-      `UPDATE orders
-      SET
-        kitchen_status = ?,
-        cooking_started_at = ?,
-        ready_at = ?,
-        completed_at = ?
-      WHERE id = ?`,
-      [orderNextStatus, cookingStartedAt, readyAt, completedAt, orderId]
-    );
+    await c.env.DB.batch(batchStmts);
 
     const updated = await getOrderById(c.env.DB, orderId);
     return c.json({ order: updated });
@@ -254,39 +282,43 @@ export function createOrdersRoutes() {
     const payment = computePaymentFields(order.subtotal, body);
     const paidAt = getBangkokNow();
 
-    const meta = await execute(
-      c.env.DB,
-      `UPDATE orders
-      SET
-        status = 'paid',
-        kitchen_status = 'pending',
-        discount_amount = ?,
-        total_amount = ?,
-        payment_method = ?,
-        received_amount = ?,
-        change_amount = ?,
-        paid_at = ?
-      WHERE id = ? AND status = 'open'`,
-      [
-        payment.discountAmount,
-        payment.totalAmount,
-        payment.paymentMethod,
-        payment.receivedAmount,
-        payment.changeAmount,
-        paidAt,
-        orderId,
-      ]
-    );
+    const results = await c.env.DB.batch([
+      prepareStmt(
+        c.env.DB,
+        `UPDATE orders
+        SET
+          status = 'paid',
+          kitchen_status = 'pending',
+          discount_amount = ?,
+          total_amount = ?,
+          payment_method = ?,
+          received_amount = ?,
+          change_amount = ?,
+          paid_at = ?
+        WHERE id = ? AND status = 'open'`,
+        [
+          payment.discountAmount,
+          payment.totalAmount,
+          payment.paymentMethod,
+          payment.receivedAmount,
+          payment.changeAmount,
+          paidAt,
+          orderId,
+        ]
+      ),
+      prepareStmt(
+        c.env.DB,
+        `UPDATE order_items
+        SET kitchen_status = 'pending'
+        WHERE order_id = ?
+          AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'paid' AND kitchen_status = 'pending')`,
+        [orderId, orderId]
+      ),
+    ]);
 
-    if (!meta.changes) {
+    if (!results[0]?.meta?.changes) {
       throw new HttpError(409, 'บิลนี้ถูกชำระเงินหรือยกเลิกไปแล้ว');
     }
-
-    await execute(
-      c.env.DB,
-      "UPDATE order_items SET kitchen_status = 'pending' WHERE order_id = ?",
-      [orderId]
-    );
 
     const updated = await getOrderById(c.env.DB, orderId);
     return c.json({ order: updated });
@@ -309,20 +341,25 @@ export function createOrdersRoutes() {
       throw new HttpError(409, 'บิลนี้ถูกยกเลิกไปแล้ว');
     }
 
-    const meta = await execute(
-      c.env.DB,
-      "UPDATE orders SET status = 'cancelled', kitchen_status = 'cancelled', cancel_reason = ? WHERE id = ? AND status != 'cancelled'",
-      [cancelReason, orderId]
-    );
-    if (!meta.changes) {
+    const results = await c.env.DB.batch([
+      prepareStmt(
+        c.env.DB,
+        "UPDATE orders SET status = 'cancelled', kitchen_status = 'cancelled', cancel_reason = ? WHERE id = ? AND status != 'cancelled'",
+        [cancelReason, orderId]
+      ),
+      prepareStmt(
+        c.env.DB,
+        `UPDATE order_items
+        SET kitchen_status = 'cancelled'
+        WHERE order_id = ?
+          AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'cancelled')`,
+        [orderId, orderId]
+      ),
+    ]);
+
+    if (!results[0]?.meta?.changes) {
       throw new HttpError(409, 'บิลนี้ถูกยกเลิกไปแล้ว');
     }
-
-    await execute(
-      c.env.DB,
-      "UPDATE order_items SET kitchen_status = 'cancelled' WHERE order_id = ?",
-      [orderId]
-    );
 
     const updated = await getOrderById(c.env.DB, orderId);
     return c.json({ order: updated });
