@@ -115,6 +115,21 @@ async function refreshOrders() {
   }
 }
 
+async function refreshOrderLists() {
+  try {
+    const [kitchenRes, openRes, historyRes] = await Promise.all([
+      api.getKitchenOrders(),
+      api.getOrders({ status: 'open' }),
+      api.getOrders({ status: 'all', date: historyDate.value }),
+    ]);
+    kitchenOrders.value = kitchenRes.orders || [];
+    openOrders.value = openRes.orders || [];
+    historyOrders.value = historyRes.orders || [];
+  } catch (err) {
+    showToast({ type: 'error', text: err.message });
+  }
+}
+
 async function refreshAll() {
   try {
     const requests = [
@@ -204,7 +219,7 @@ function ensureStaff() {
 }
 
 async function handleSendToKitchen() {
-  if (!ensureStaff() || cart.items.value.length === 0) {
+  if (!ensureStaff() || cart.items.value.length === 0 || submittingOrder.value) {
     return;
   }
 
@@ -220,7 +235,7 @@ async function handleSendToKitchen() {
     cart.clearCart();
     customerName.value = '';
     queueTicketOrder.value = res.order;
-    await refreshAll();
+    await refreshOrderLists();
   } catch (err) {
     showToast({ type: 'error', text: err.message });
   } finally {
@@ -258,7 +273,7 @@ function handleCheckoutOrder(order) {
 }
 
 async function handleConfirmPay(paymentPayload) {
-  if (!checkoutContext.value) {
+  if (!checkoutContext.value || submittingOrder.value) {
     return;
   }
   submittingOrder.value = true;
@@ -280,7 +295,7 @@ async function handleConfirmPay(paymentPayload) {
     }
 
     paidOrder.value = response.order;
-    await refreshAll();
+    await refreshOrderLists();
   } catch (err) {
     showToast({ type: 'error', text: err.message });
   } finally {
@@ -297,7 +312,7 @@ async function handleUpdateKitchenStatus(orderId, kitchenStatus, categoryId = nu
   updatingKitchenId.value = orderId;
   try {
     await api.updateKitchenStatus(orderId, kitchenStatus, categoryId);
-    await refreshAll();
+    await refreshOrderLists();
   } catch (err) {
     showToast({ type: 'error', text: err.message });
   } finally {
@@ -309,7 +324,7 @@ async function handleCancelOrder({ orderId, reason }) {
   try {
     await api.cancelOrder(orderId, reason);
     showToast({ type: 'success', text: 'ยกเลิกบิลเรียบร้อย' });
-    await refreshAll();
+    await refreshOrderLists();
   } catch (err) {
     showToast({ type: 'error', text: err.message });
   }
@@ -322,7 +337,7 @@ async function handleClearAllOrders() {
       type: 'success',
       text: `ล้างบิลและคิวทั้งหมดแล้ว (${res.deleted_orders} บิล) • เริ่มคิว Q001 ใหม่`,
     });
-    await refreshAll();
+    await refreshOrderLists();
   } catch (err) {
     showToast({ type: 'error', text: err.message });
   }
