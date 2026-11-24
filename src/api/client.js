@@ -114,4 +114,11 @@ export const api = {
   getPaymentSettings: () => apiFetch('/settings/payment'),
   updatePaymentSettings: (payload) =>
     apiFetch('/settings/payment', { method: 'PUT', body: payload }),
+
+  exportBackup: () => apiFetch('/backup/export'),
+  restoreBackup: (backup) =>
+    apiFetch('/backup/restore', {
+      method: 'POST',
+      body: { confirm: 'RESTORE_BACKUP', backup },
+    }),
 };

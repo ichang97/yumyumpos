@@ -8,6 +8,7 @@ import {
   BarChart3,
   Check,
   Copy,
+  Download,
   ExternalLink,
   Layers,
   Pencil,
@@ -98,6 +99,10 @@ const categoryForm = ref({
 });
 
 const confirmDialog = ref(null);
+const backupFileInput = ref(null);
+const exportingBackup = ref(false);
+const restoringBackup = ref(false);
+const pendingRestore = ref(null);
 
 const orderUrl = `${window.location.origin}/order`;
 const qrDataUrl = ref('');
@@ -600,6 +605,112 @@ async function executeConfirmDelete() {
   } catch (err) {
     emit('notify', { type: 'error', text: err.message });
   } finally {
+    busy.value = false;
+  }
+}
+
+async function handleExportBackup() {
+  if (exportingBackup.value || busy.value) {
+    return;
+  }
+  exportingBackup.value = true;
+  try {
+    const backup = await api.exportBackup();
+    const jsonText = JSON.stringify(backup, null, 2);
+    const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `yumyum-pos-backup-${getBangkokDateStr()}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    emit('notify', { type: 'success', text: 'ดาวน์โหลดไฟล์สำรองข้อมูลเรียบร้อยแล้ว' });
+  } catch (err) {
+    emit('notify', { type: 'error', text: err.message });
+  } finally {
+    exportingBackup.value = false;
+  }
+}
+
+function triggerRestoreFilePicker() {
+  backupFileInput.value?.click();
+}
+
+async function handleRestoreFileSelect(event) {
+  const file = event.target?.files?.[0];
+  if (event.target) {
+    event.target.value = '';
+  }
+  if (!file) {
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    emit('notify', { type: 'error', text: 'ไฟล์สำรองข้อมูลมีขนาดใหญ่เกิน 5 MB' });
+    return;
+  }
+  try {
+    const rawText = await file.text();
+    const parsed = JSON.parse(rawText);
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      parsed.app !== 'yumyum-pos' ||
+      parsed.version !== 1 ||
+      !parsed.data ||
+      !Array.isArray(parsed.data.categories) ||
+      !Array.isArray(parsed.data.menus) ||
+      !Array.isArray(parsed.data.orders)
+    ) {
+      emit('notify', { type: 'error', text: 'ไฟล์ JSON ไม่ใช่รูปแบบสำรองข้อมูลของระบบ' });
+      return;
+    }
+    const settingsList = Array.isArray(parsed.data.shop_settings)
+      ? parsed.data.shop_settings
+      : [];
+    const hasQrImage = settingsList.some(
+      (item) => item && item.key === 'qr_image_data' && Boolean(item.value)
+    );
+    pendingRestore.value = {
+      filename: file.name,
+      backup: parsed,
+      summary: {
+        exported_at: parsed.exported_at || '-',
+        categories: parsed.data.categories.length,
+        menus: parsed.data.menus.length,
+        option_groups: Array.isArray(parsed.data.option_groups)
+          ? parsed.data.option_groups.length
+          : 0,
+        orders: parsed.data.orders.length,
+        has_qr_image: hasQrImage,
+      },
+    };
+  } catch {
+    emit('notify', { type: 'error', text: 'ไม่สามารถอ่านไฟล์ JSON ได้ กรุณาตรวจสอบไฟล์' });
+  }
+}
+
+async function confirmRestoreBackup() {
+  if (!pendingRestore.value || restoringBackup.value) {
+    return;
+  }
+  restoringBackup.value = true;
+  busy.value = true;
+  try {
+    const res = await api.restoreBackup(pendingRestore.value.backup);
+    pendingRestore.value = null;
+    reportData.value = null;
+    qrImageDraft.value = undefined;
+    emit('notify', {
+      type: 'success',
+      text: `กู้คืนข้อมูลเรียบร้อยแล้ว (เมนู ${res.counts?.menus ?? 0} รายการ • บิล ${res.counts?.orders ?? 0} บิล)`,
+    });
+    emit('refreshAll');
+  } catch (err) {
+    emit('notify', { type: 'error', text: err.message });
+  } finally {
+    restoringBackup.value = false;
     busy.value = false;
   }
 }
@@ -1119,6 +1230,47 @@ async function executeConfirmDelete() {
             {{ busy ? 'กำลังบันทึก...' : 'บันทึกการตั้งค่าชำระเงิน' }}
           </button>
         </form>
+        </div>
+
+        <div class="bg-white rounded-2xl border border-stone-200 p-4 space-y-3">
+          <div class="space-y-0.5">
+            <h3 class="font-bold text-stone-900 text-sm md:text-base">
+              สำรองและกู้คืนข้อมูล (Backup / Restore JSON)
+            </h3>
+            <p class="text-xs text-stone-500">
+              ส่งออกหรือกู้คืนข้อมูลทั้งหมดในระบบเป็นไฟล์ JSON (หมวดหมู่, เมนูอาหาร, กลุ่มตัวเลือก, บิลและประวัติยอดขาย, การตั้งค่าชำระเงิน และรูป QR)
+            </p>
+          </div>
+
+          <input
+            ref="backupFileInput"
+            type="file"
+            accept="application/json,.json"
+            class="hidden"
+            @change="handleRestoreFileSelect"
+          />
+
+          <div class="flex flex-col sm:flex-row gap-2.5">
+            <button
+              type="button"
+              :disabled="exportingBackup || restoringBackup || busy"
+              class="flex-1 min-h-11 px-4 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-sm flex items-center justify-center gap-1.5 disabled:opacity-50"
+              @click="handleExportBackup"
+            >
+              <Download class="w-4 h-4" />
+              <span>{{ exportingBackup ? 'กำลังส่งออก...' : 'Export สำรองข้อมูล (.json)' }}</span>
+            </button>
+
+            <button
+              type="button"
+              :disabled="exportingBackup || restoringBackup || busy"
+              class="flex-1 min-h-11 px-4 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 font-bold text-sm flex items-center justify-center gap-1.5 disabled:opacity-50"
+              @click="triggerRestoreFilePicker"
+            >
+              <Upload class="w-4 h-4" />
+              <span>Restore กู้คืนจากไฟล์ (.json)</span>
+            </button>
+          </div>
         </div>
 
         <div class="bg-red-50/70 rounded-2xl border border-red-200 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -1692,6 +1844,71 @@ async function executeConfirmDelete() {
             @click="executeConfirmDelete"
           >
             ยืนยันลบ
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="pendingRestore"
+      class="fixed inset-0 z-50 bg-stone-900/50 flex items-center justify-center p-4 no-print"
+      @click.self="if (!restoringBackup) pendingRestore = null;"
+    >
+      <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl p-5 space-y-4">
+        <div class="space-y-1">
+          <h3 class="font-bold text-stone-900 text-base">ยืนยันการกู้คืนข้อมูลทั้งหมด?</h3>
+          <p class="text-xs text-stone-500 break-all">
+            ไฟล์: {{ pendingRestore.filename }}
+          </p>
+        </div>
+
+        <div class="rounded-xl bg-stone-50 border border-stone-200 p-3 space-y-1.5 text-xs text-stone-700">
+          <div class="flex items-center justify-between">
+            <span>สำรองข้อมูลเมื่อ</span>
+            <span class="font-semibold text-stone-900 tabular-nums">{{ pendingRestore.summary.exported_at }}</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>หมวดหมู่ / เมนูอาหาร</span>
+            <span class="font-semibold text-stone-900 tabular-nums">
+              {{ pendingRestore.summary.categories }} หมวดหมู่ • {{ pendingRestore.summary.menus }} เมนู
+            </span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>กลุ่มตัวเลือก</span>
+            <span class="font-semibold text-stone-900 tabular-nums">{{ pendingRestore.summary.option_groups }} กลุ่ม</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>บิลและคิวทั้งหมด</span>
+            <span class="font-semibold text-stone-900 tabular-nums">{{ pendingRestore.summary.orders }} บิล</span>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>รูป QR ชำระเงินของร้าน</span>
+            <span class="font-semibold text-stone-900">
+              {{ pendingRestore.summary.has_qr_image ? 'รวมอยู่ในไฟล์' : 'ไม่มีรูปในไฟล์' }}
+            </span>
+          </div>
+        </div>
+
+        <p class="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-900 leading-relaxed">
+          ข้อมูลปัจจุบันทั้งหมดในระบบจะถูกแทนที่ด้วยข้อมูลจากไฟล์สำรองนี้ทันทีและไม่สามารถย้อนกลับได้
+        </p>
+
+        <div class="grid grid-cols-2 gap-2.5">
+          <button
+            type="button"
+            :disabled="restoringBackup"
+            class="min-h-11 rounded-xl border border-stone-300 bg-white hover:bg-stone-50 text-stone-700 font-bold text-sm disabled:opacity-50"
+            @click="pendingRestore = null"
+          >
+            ยกเลิก
+          </button>
+          <button
+            type="button"
+            :disabled="restoringBackup"
+            class="min-h-11 rounded-xl bg-brand hover:bg-brand-dark text-white font-bold text-sm disabled:opacity-50"
+            @click="confirmRestoreBackup"
+          >
+            {{ restoringBackup ? 'กำลังกู้คืน...' : 'ยืนยันกู้คืนข้อมูล' }}
           </button>
         </div>
       </div>
