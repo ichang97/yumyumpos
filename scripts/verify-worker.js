@@ -1192,7 +1192,192 @@ async function main() {
     assert.equal((await request(env, '/api/public/catalog', { noAuth: true })).status, 200);
     console.log('PASS 16: Security hardening (Access JWT, RBAC, CSRF, query span, rate limit, public bypass) verified');
 
-    console.log('\nALL 16 VERIFICATION CHECKS PASSED!');
+    assert.equal(
+      (await request(env, '/api/backup/export', { token: staffToken })).status,
+      403
+    );
+    assert.equal(
+      (
+        await request(env, '/api/backup/restore', {
+          method: 'POST',
+          token: staffToken,
+          body: { confirm: 'RESTORE_BACKUP', backup: {} },
+        })
+      ).status,
+      403
+    );
+
+    const setQrBeforeBackup = await request(env, '/api/settings/payment', {
+      method: 'PUT',
+      body: {
+        enable_cash: true,
+        enable_qr: true,
+        promptpay_id: '0812345678',
+        promptpay_name: 'ร้านยำยำ สำรอง',
+        qr_image_data: validPngDataUrl,
+      },
+    });
+    assert.equal(setQrBeforeBackup.status, 200);
+
+    const exportRes = await request(env, '/api/backup/export');
+    assert.equal(exportRes.status, 200);
+    assert.equal(exportRes.data.app, 'yumyum-pos');
+    assert.equal(exportRes.data.version, 1);
+    assert.ok(exportRes.data.data.categories.length > 0);
+    assert.ok(exportRes.data.data.menus.length > 0);
+    assert.ok(exportRes.data.data.option_groups.length > 0);
+    assert.ok(exportRes.data.data.orders.length > 0);
+    assert.ok(exportRes.data.data.daily_counters.length > 0);
+    assert.ok(
+      exportRes.data.data.shop_settings.some(
+        (s) => s.key === 'qr_image_data' && s.value === validPngDataUrl
+      )
+    );
+
+    const exportedSnapshot = exportRes.data;
+    const expectedCatCount = exportedSnapshot.data.categories.length;
+    const expectedOrderCount = exportedSnapshot.data.orders.length;
+    const maxRestoredQueue = Math.max(
+      ...exportedSnapshot.data.orders.map((o) => Number(o.queue_no || 0))
+    );
+
+    assert.equal(
+      (
+        await request(env, '/api/orders/clear-all', {
+          method: 'POST',
+          body: { confirm: 'CLEAR_ALL' },
+        })
+      ).status,
+      200
+    );
+    assert.equal(
+      (
+        await request(env, '/api/settings/payment', {
+          method: 'PUT',
+          body: {
+            enable_cash: true,
+            enable_qr: true,
+            qr_image_data: '',
+          },
+        })
+      ).status,
+      200
+    );
+    assert.equal(
+      (
+        await request(env, '/api/categories', {
+          method: 'POST',
+          body: { name: 'หมวดชั่วคราว', sort_order: 88, is_active: true },
+        })
+      ).status,
+      201
+    );
+
+    assert.equal(
+      (
+        await request(env, '/api/backup/restore', {
+          method: 'POST',
+          body: { backup: exportedSnapshot },
+        })
+      ).status,
+      400
+    );
+
+    const wrongVersionBackup = structuredClone(exportedSnapshot);
+    wrongVersionBackup.version = 99;
+    assert.equal(
+      (
+        await request(env, '/api/backup/restore', {
+          method: 'POST',
+          body: { confirm: 'RESTORE_BACKUP', backup: wrongVersionBackup },
+        })
+      ).status,
+      400
+    );
+
+    const spoofQrBackup = structuredClone(exportedSnapshot);
+    spoofQrBackup.data.shop_settings = spoofQrBackup.data.shop_settings.map((row) =>
+      row.key === 'qr_image_data'
+        ? { ...row, value: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=' }
+        : row
+    );
+    assert.equal(
+      (
+        await request(env, '/api/backup/restore', {
+          method: 'POST',
+          body: { confirm: 'RESTORE_BACKUP', backup: spoofQrBackup },
+        })
+      ).status,
+      400
+    );
+
+    const brokenFkBackup = structuredClone(exportedSnapshot);
+    brokenFkBackup.data.menus[0].category_id = 999999;
+    assert.equal(
+      (
+        await request(env, '/api/backup/restore', {
+          method: 'POST',
+          body: { confirm: 'RESTORE_BACKUP', backup: brokenFkBackup },
+        })
+      ).status,
+      400
+    );
+
+    const catsDuringMutation = await request(env, '/api/categories');
+    assert.ok(catsDuringMutation.data.categories.some((c) => c.name === 'หมวดชั่วคราว'));
+
+    const restoreRes = await request(env, '/api/backup/restore', {
+      method: 'POST',
+      body: { confirm: 'RESTORE_BACKUP', backup: exportedSnapshot },
+    });
+    assert.equal(restoreRes.status, 200);
+    assert.equal(restoreRes.data.restored, true);
+    assert.equal(restoreRes.data.counts.categories, expectedCatCount);
+    assert.equal(restoreRes.data.counts.orders, expectedOrderCount);
+
+    const catsAfterRestore = await request(env, '/api/categories');
+    assert.equal(catsAfterRestore.status, 200);
+    assert.equal(catsAfterRestore.data.categories.length, expectedCatCount);
+    assert.equal(
+      catsAfterRestore.data.categories.some((c) => c.name === 'หมวดชั่วคราว'),
+      false
+    );
+
+    const ordersAfterRestore = await request(env, '/api/orders?status=all');
+    assert.equal(ordersAfterRestore.status, 200);
+    assert.equal(ordersAfterRestore.data.orders.length, expectedOrderCount);
+
+    const qrAfterRestore = await requestRaw(env, '/api/public/payment-qr');
+    assert.equal(qrAfterRestore.status, 200);
+    assert.equal(qrAfterRestore.headers.get('content-type'), 'image/png');
+    assert.equal(qrAfterRestore.bytes[0], 0x89);
+    assert.equal(qrAfterRestore.bytes[1], 0x50);
+    assert.equal(qrAfterRestore.bytes[2], 0x4e);
+    assert.equal(qrAfterRestore.bytes[3], 0x47);
+
+    const postRestoreOrderRes = await request(env, '/api/orders', {
+      method: 'POST',
+      body: {
+        order_type: 'takeaway',
+        staff_name: 'มาร์ค',
+        pay_now: true,
+        payment_method: 'cash',
+        received_amount: 20,
+        items: [
+          {
+            is_custom: false,
+            menu_id: water.id,
+            option_ids: [],
+            quantity: 1,
+          },
+        ],
+      },
+    });
+    assert.equal(postRestoreOrderRes.status, 201);
+    assert.equal(postRestoreOrderRes.data.order.queue_no, maxRestoredQueue + 1);
+    console.log('PASS 17: Backup JSON export, validation guards, and atomic full restore verified');
+
+    console.log('\nALL 17 VERIFICATION CHECKS PASSED!');
   } finally {
     globalThis.fetch = originalFetch;
     clearJwksCache();
