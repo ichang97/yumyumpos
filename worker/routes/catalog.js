@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAdmin } from '../lib/accessAuth.js';
 import { execute, prepareStmt, queryAll, queryByIdChunks, queryFirst } from '../lib/db.js';
 import {
   HttpError,
@@ -129,7 +130,7 @@ export function createCatalogRoutes() {
     return c.json({ categories });
   });
 
-  router.post('/categories', async (c) => {
+  router.post('/categories', requireAdmin, async (c) => {
     const body = await parseJsonBody(c);
     const name = requireString(body.name, 'ชื่อหมวดหมู่', 80);
     const sortOrder =
@@ -149,7 +150,7 @@ export function createCatalogRoutes() {
     return c.json({ category }, 201);
   });
 
-  router.put('/categories/:id', async (c) => {
+  router.put('/categories/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสหมวดหมู่', 1);
     const existing = await queryFirst(
       c.env.DB,
@@ -181,7 +182,7 @@ export function createCatalogRoutes() {
     return c.json({ category });
   });
 
-  router.delete('/categories/:id', async (c) => {
+  router.delete('/categories/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสหมวดหมู่', 1);
     const existing = await queryFirst(
       c.env.DB,
@@ -210,7 +211,7 @@ export function createCatalogRoutes() {
     return c.json({ option_groups: optionGroups });
   });
 
-  router.post('/option-groups', async (c) => {
+  router.post('/option-groups', requireAdmin, async (c) => {
     const body = await parseJsonBody(c);
     const name = requireString(body.name, 'ชื่อกลุ่มตัวเลือก', 80);
     const selectionType = body.selection_type === 'multiple' ? 'multiple' : 'single';
@@ -238,7 +239,7 @@ export function createCatalogRoutes() {
     return c.json({ option_group: { ...group, options: [] } }, 201);
   });
 
-  router.put('/option-groups/:id', async (c) => {
+  router.put('/option-groups/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสกลุ่มตัวเลือก', 1);
     const existing = await queryFirst(
       c.env.DB,
@@ -282,7 +283,7 @@ export function createCatalogRoutes() {
     return c.json({ option_group: { ...group, options } });
   });
 
-  router.delete('/option-groups/:id', async (c) => {
+  router.delete('/option-groups/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสกลุ่มตัวเลือก', 1);
     const meta = await execute(c.env.DB, 'DELETE FROM option_groups WHERE id = ?', [id]);
     if (!meta.changes) {
@@ -291,7 +292,7 @@ export function createCatalogRoutes() {
     return c.json({ deleted: true });
   });
 
-  router.post('/option-groups/:groupId/options', async (c) => {
+  router.post('/option-groups/:groupId/options', requireAdmin, async (c) => {
     const groupId = requireInt(Number(c.req.param('groupId')), 'รหัสกลุ่มตัวเลือก', 1);
     const group = await queryFirst(
       c.env.DB,
@@ -323,7 +324,7 @@ export function createCatalogRoutes() {
     return c.json({ option }, 201);
   });
 
-  router.put('/options/:id', async (c) => {
+  router.put('/options/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสตัวเลือก', 1);
     const existing = await queryFirst(
       c.env.DB,
@@ -359,7 +360,7 @@ export function createCatalogRoutes() {
     return c.json({ option });
   });
 
-  router.patch('/options/:id/availability', async (c) => {
+  router.patch('/options/:id/availability', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสตัวเลือก', 1);
     const existing = await queryFirst(
       c.env.DB,
@@ -387,7 +388,7 @@ export function createCatalogRoutes() {
     return c.json({ option });
   });
 
-  router.delete('/options/:id', async (c) => {
+  router.delete('/options/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสตัวเลือก', 1);
     const meta = await execute(c.env.DB, 'DELETE FROM options WHERE id = ?', [id]);
     if (!meta.changes) {
@@ -401,7 +402,7 @@ export function createCatalogRoutes() {
     return c.json({ menus });
   });
 
-  router.post('/menus', async (c) => {
+  router.post('/menus', requireAdmin, async (c) => {
     const body = await parseJsonBody(c);
     const categoryId = requireInt(Number(body.category_id), 'หมวดหมู่', 1);
     const category = await queryFirst(
@@ -455,7 +456,7 @@ export function createCatalogRoutes() {
     );
   });
 
-  router.put('/menus/:id', async (c) => {
+  router.put('/menus/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสเมนู', 1);
     const existing = await queryFirst(
       c.env.DB,
@@ -537,7 +538,7 @@ export function createCatalogRoutes() {
     });
   });
 
-  router.patch('/menus/:id/availability', async (c) => {
+  router.patch('/menus/:id/availability', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสเมนู', 1);
     const existing = await queryFirst(
       c.env.DB,
@@ -577,7 +578,7 @@ export function createCatalogRoutes() {
     });
   });
 
-  router.delete('/menus/:id', async (c) => {
+  router.delete('/menus/:id', requireAdmin, async (c) => {
     const id = requireInt(Number(c.req.param('id')), 'รหัสเมนู', 1);
     const meta = await execute(c.env.DB, 'DELETE FROM menus WHERE id = ?', [id]);
     if (!meta.changes) {

@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAdmin } from '../lib/accessAuth.js';
 import { queryAll, queryFirst } from '../lib/db.js';
 import { getBangkokDate } from '../lib/time.js';
 import { HttpError, requireDateString } from '../lib/validate.js';
@@ -6,13 +7,17 @@ import { HttpError, requireDateString } from '../lib/validate.js';
 export function createReportsRoutes() {
   const router = new Hono();
 
-  router.get('/reports/summary', async (c) => {
+  router.get('/reports/summary', requireAdmin, async (c) => {
     const today = getBangkokDate();
     const from = requireDateString(c.req.query('from'), today);
     const to = requireDateString(c.req.query('to'), today);
 
     if (from > to) {
       throw new HttpError(400, 'วันที่เริ่มต้นต้องไม่เกินวันที่สิ้นสุด');
+    }
+    const spanDays = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000;
+    if (spanDays > 366) {
+      throw new HttpError(400, 'ช่วงเวลาของรายงานต้องไม่เกิน 366 วัน');
     }
 
     const [paidSummary, cancelledSummary, openSummary, topMenus, daily] = await Promise.all([

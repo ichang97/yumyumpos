@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAdmin } from '../lib/accessAuth.js';
 import { prepareStmt, queryAll, queryFirst } from '../lib/db.js';
 import { getBangkokNow } from '../lib/time.js';
 import { HttpError, optionalString, parseJsonBody } from '../lib/validate.js';
@@ -126,7 +127,7 @@ export function createSettingsRoutes() {
     return c.json({ payment });
   });
 
-  router.put('/settings/payment', async (c) => {
+  router.put('/settings/payment', requireAdmin, async (c) => {
     const body = await parseJsonBody(c);
     const enableCash = Boolean(body.enable_cash);
     const enableQr = Boolean(body.enable_qr);
@@ -185,6 +186,16 @@ export function createSettingsRoutes() {
     await c.env.DB.batch(stmts);
 
     const payment = await getPaymentSettings(c.env.DB);
+    console.log(
+      JSON.stringify({
+        event: 'payment_settings_updated',
+        actor: c.get('authUser')?.email || 'unknown',
+        enable_cash: enableCash,
+        enable_qr: enableQr,
+        has_qr_image: payment.has_qr_image,
+        at: now,
+      })
+    );
     return c.json({ payment });
   });
 

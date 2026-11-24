@@ -33,6 +33,19 @@ export function createPublicRoutes() {
   });
 
   router.post('/orders', async (c) => {
+    if (c.env?.PUBLIC_ORDER_LIMITER) {
+      const clientIp =
+        c.req.header('cf-connecting-ip') ||
+        c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ||
+        'unknown';
+      const limitResult = await c.env.PUBLIC_ORDER_LIMITER.limit({
+        key: `public-order:${clientIp}`,
+      });
+      if (!limitResult?.success) {
+        throw new HttpError(429, 'สั่งอาหารถี่เกินไป กรุณารอสักครู่');
+      }
+    }
+
     const body = await parseJsonBody(c);
     const customerName = optionalString(body.customer_name, 60);
 

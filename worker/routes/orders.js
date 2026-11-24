@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { requireAdmin } from '../lib/accessAuth.js';
 import { prepareStmt, queryAll, queryFirst } from '../lib/db.js';
 import {
   ORDER_COLUMNS,
@@ -44,7 +45,7 @@ export function createOrdersRoutes() {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = await queryAll(
       c.env.DB,
-      `SELECT ${ORDER_COLUMNS} FROM orders ${whereClause} ORDER BY id DESC`,
+      `SELECT ${ORDER_COLUMNS} FROM orders ${whereClause} ORDER BY id DESC LIMIT 500`,
       params
     );
 
@@ -66,7 +67,7 @@ export function createOrdersRoutes() {
     return c.json({ orders });
   });
 
-  router.post('/orders/clear-all', async (c) => {
+  router.post('/orders/clear-all', requireAdmin, async (c) => {
     const body = await parseJsonBody(c);
     if (body.confirm !== 'CLEAR_ALL') {
       throw new HttpError(400, 'กรุณายืนยันการล้างบิลและคิวทั้งหมด');
@@ -81,9 +82,19 @@ export function createOrdersRoutes() {
       prepareStmt(c.env.DB, 'DELETE FROM daily_counters'),
     ]);
 
+    const deletedOrders = Number(countRow?.total || 0);
+    console.log(
+      JSON.stringify({
+        event: 'orders_cleared_all',
+        actor: c.get('authUser')?.email || 'unknown',
+        deleted_orders: deletedOrders,
+        at: getBangkokNow(),
+      })
+    );
+
     return c.json({
       cleared: true,
-      deleted_orders: Number(countRow?.total || 0),
+      deleted_orders: deletedOrders,
     });
   });
 
