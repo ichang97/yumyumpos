@@ -3,16 +3,32 @@
   "name": "yumyum-pos",
   "main": "./worker/index.js",
   "compatibility_date": "2026-11-20",
+  "workers_dev": true,
+  "preview_urls": false,
   "observability": {
     "enabled": true,
     "traces": {
       "enabled": true
     }
   },
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "https://marklab.cloudflareaccess.com",
+    "ACCESS_AUD": "d4359175dc935a7ae0f6a54c43c3572d348669b30f8ce45cb8ee4c805e4de1e8"
+  },
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
+  "ratelimits": [
+    {
+      "name": "PUBLIC_ORDER_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
