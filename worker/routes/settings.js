@@ -9,7 +9,7 @@ const QR_IMAGE_KEY = 'qr_image_data';
 const QR_IMAGE_MAX_LENGTH = 400000;
 const QR_IMAGE_DATA_URL_RE = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/;
 
-function parseQrImageDataUrl(raw) {
+export function parseQrImageDataUrl(raw) {
   if (typeof raw !== 'string') {
     throw new HttpError(400, 'รองรับเฉพาะไฟล์รูปภาพ PNG, JPG หรือ WebP เท่านั้น');
   }

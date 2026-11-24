@@ -4,6 +4,7 @@ import { secureHeaders } from 'hono/secure-headers';
 import { requireAccessAuth } from './lib/accessAuth.js';
 import { getBangkokNow } from './lib/time.js';
 import { HttpError } from './lib/validate.js';
+import { createBackupRoutes } from './routes/backup.js';
 import { createCatalogRoutes } from './routes/catalog.js';
 import { createOrdersRoutes } from './routes/orders.js';
 import { createPublicRoutes } from './routes/public.js';
@@ -62,19 +63,29 @@ app.use('/api/*', async (c, next) => {
 
 app.use('/api/*', requireAccessAuth);
 
-app.use(
-  '/api/*',
-  bodyLimit({
-    maxSize: 512 * 1024,
-    onError: (c) => c.json({ error: 'ขนาดข้อมูลใหญ่เกินกำหนด' }, 413),
-  })
-);
+const defaultBodyLimit = bodyLimit({
+  maxSize: 512 * 1024,
+  onError: (c) => c.json({ error: 'ขนาดข้อมูลใหญ่เกินกำหนด' }, 413),
+});
+
+const backupRestoreBodyLimit = bodyLimit({
+  maxSize: 5 * 1024 * 1024,
+  onError: (c) => c.json({ error: 'ไฟล์สำรองข้อมูลมีขนาดใหญ่เกิน 5 MB' }, 413),
+});
+
+app.use('/api/*', async (c, next) => {
+  if (c.req.path === '/api/backup/restore' && c.req.method === 'POST') {
+    return backupRestoreBodyLimit(c, next);
+  }
+  return defaultBodyLimit(c, next);
+});
 
 app.get('/api/health', (c) => c.json({ ok: true, time: getBangkokNow() }));
 
 app.get('/api/me', (c) => c.json({ user: c.get('authUser') }));
 
 app.route('/api/public', createPublicRoutes());
+app.route('/api', createBackupRoutes());
 app.route('/api', createCatalogRoutes());
 app.route('/api', createOrdersRoutes());
 app.route('/api', createReportsRoutes());
