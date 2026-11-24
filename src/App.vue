@@ -24,6 +24,7 @@ const { isAdminMode, tapCount, registerLogoTap, exitAdminMode } = useAdminMode()
 const cart = useCart();
 
 const activeTab = ref('pos');
+const currentUser = ref({ email: '', is_admin: false });
 const catalog = ref({
   categories: [],
   menus: [],
@@ -132,25 +133,32 @@ async function refreshOrderLists() {
 
 async function refreshAll() {
   try {
-    const requests = [
+    const baseRequests = [
+      api.getMe(),
       api.getCatalog(),
       api.getKitchenOrders(),
       api.getOrders({ status: 'open' }),
       api.getOrders({ status: 'all', date: historyDate.value }),
     ];
-    if (isAdminMode.value) {
-      requests.push(api.getCategories(), api.getMenus());
+
+    const [meRes, catalogRes, kitchenRes, openRes, historyRes] = await Promise.all(baseRequests);
+    currentUser.value = meRes?.user || { email: '', is_admin: false };
+    catalog.value = catalogRes;
+    kitchenOrders.value = kitchenRes.orders || [];
+    openOrders.value = openRes.orders || [];
+    historyOrders.value = historyRes.orders || [];
+
+    if (!currentUser.value.is_admin && isAdminMode.value) {
+      exitAdminMode();
     }
 
-    const results = await Promise.all(requests);
-    catalog.value = results[0];
-    kitchenOrders.value = results[1].orders || [];
-    openOrders.value = results[2].orders || [];
-    historyOrders.value = results[3].orders || [];
-
-    if (isAdminMode.value) {
-      adminCategories.value = results[4].categories || [];
-      adminMenus.value = results[5].menus || [];
+    if (isAdminMode.value && currentUser.value.is_admin) {
+      const [categoriesRes, menusRes] = await Promise.all([
+        api.getCategories(),
+        api.getMenus(),
+      ]);
+      adminCategories.value = categoriesRes.categories || [];
+      adminMenus.value = menusRes.menus || [];
     }
   } catch (err) {
     showToast({ type: 'error', text: err.message });
@@ -190,6 +198,11 @@ onUnmounted(() => {
 function handleLogoTap() {
   const result = registerLogoTap();
   if (result.toggled && result.unlocked) {
+    if (!currentUser.value.is_admin) {
+      exitAdminMode();
+      showToast({ type: 'error', text: 'บัญชีนี้ไม่มีสิทธิ์ Admin' });
+      return;
+    }
     showToast({ type: 'info', text: 'เปิดโหมด Admin แล้ว' });
     return;
   }

@@ -22,6 +22,7 @@ async function apiFetch(path, options = {}) {
 }
 
 export const api = {
+  getMe: () => apiFetch('/me'),
   getCatalog: () => apiFetch('/catalog'),
 
   getCategories: () => apiFetch('/categories'),
