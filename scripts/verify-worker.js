@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { sign } from 'hono/jwt';
 import { getPlatformProxy } from 'wrangler';
 import {
   DEFAULT_SPEECH_RATE,
@@ -11,8 +12,14 @@ import {
 import { buildStationOrders, countActiveByStation } from '../src/utils/kitchenStation.js';
 import { buildPromptPayPayload } from '../src/utils/promptpay.js';
 import { app } from '../worker/index.js';
+import { clearJwksCache } from '../worker/lib/accessAuth.js';
 
 const verifyStateDir = path.resolve(process.cwd(), '.wrangler/verify-state');
+const TEST_TEAM_DOMAIN = 'https://marklab.cloudflareaccess.com';
+const TEST_AUD = 'd4359175dc935a7ae0f6a54c43c3572d348669b30f8ce45cb8ee4c805e4de1e8';
+const TEST_ADMINS = 'admin@example.com';
+
+let defaultAuthToken = '';
 
 function cleanupState() {
   fs.rmSync(verifyStateDir, { recursive: true, force: true });
@@ -30,14 +37,23 @@ async function applySqlFile(db, filePath) {
 }
 
 async function request(env, urlPath, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  let body = options.body;
+  const { token, noAuth, headers: rawHeaders, body: rawBody, ...restOptions } = options;
+  const headers = { ...(rawHeaders || {}) };
+  if (!urlPath.startsWith('/api/public/') && !noAuth && !headers['cf-access-jwt-assertion']) {
+    const chosenToken = token !== undefined ? token : defaultAuthToken;
+    if (chosenToken) {
+      headers['cf-access-jwt-assertion'] = chosenToken;
+    }
+  }
+  let body = rawBody;
   if (body !== undefined && typeof body !== 'string') {
-    headers['Content-Type'] = 'application/json';
+    if (!headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
     body = JSON.stringify(body);
   }
   const req = new Request(`http://localhost${urlPath}`, {
-    ...options,
+    ...restOptions,
     headers,
     body,
   });
@@ -67,13 +83,77 @@ function findOptionId(optionGroups, groupName, optionName) {
 
 async function main() {
   cleanupState();
+  clearJwksCache();
   const proxy = await getPlatformProxy({
     configPath: path.resolve(process.cwd(), 'wrangler.jsonc'),
     persist: { path: verifyStateDir },
   });
 
+  const originalFetch = globalThis.fetch;
+
   try {
-    const env = proxy.env;
+    const keyPair = await crypto.subtle.generateKey(
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: 'SHA-256',
+      },
+      true,
+      ['sign', 'verify']
+    );
+    const privateJwk = {
+      ...(await crypto.subtle.exportKey('jwk', keyPair.privateKey)),
+      kid: 'test-key-1',
+      alg: 'RS256',
+    };
+    const publicJwk = {
+      ...(await crypto.subtle.exportKey('jwk', keyPair.publicKey)),
+      kid: 'test-key-1',
+      alg: 'RS256',
+      use: 'sig',
+    };
+
+    globalThis.fetch = async (input, init) => {
+      const targetUrl = typeof input === 'string' ? input : input?.url || '';
+      if (targetUrl === `${TEST_TEAM_DOMAIN}/cdn-cgi/access/certs`) {
+        return new Response(JSON.stringify({ keys: [publicJwk] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return originalFetch(input, init);
+    };
+
+    async function makeAccessJwt({
+      email = 'admin@example.com',
+      aud = TEST_AUD,
+      iss = TEST_TEAM_DOMAIN,
+      expOffsetSec = 3600,
+    } = {}) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      return sign(
+        {
+          email,
+          aud: [aud],
+          iss,
+          iat: nowSec - 10,
+          nbf: nowSec - 10,
+          exp: nowSec + expOffsetSec,
+        },
+        privateJwk,
+        'RS256'
+      );
+    }
+
+    defaultAuthToken = await makeAccessJwt();
+
+    const env = {
+      ...proxy.env,
+      ACCESS_TEAM_DOMAIN: TEST_TEAM_DOMAIN,
+      ACCESS_AUD: TEST_AUD,
+      ADMIN_EMAILS: TEST_ADMINS,
+    };
     await applySqlFile(env.DB, path.resolve(process.cwd(), 'migrations/0001_init.sql'));
     await applySqlFile(env.DB, path.resolve(process.cwd(), 'migrations/0002_seed.sql'));
     await applySqlFile(
@@ -993,8 +1073,129 @@ async function main() {
     assert.equal(postClearSeqRes.data.order.queue_no, 1);
     console.log('PASS 15: Concurrency stress test (15 parallel orders, 3 parallel stations, double-pay guard) verified');
 
-    console.log('\nALL 15 VERIFICATION CHECKS PASSED!');
+    const staffToken = await makeAccessJwt({ email: 'staff@example.com' });
+    const wrongAudToken = await makeAccessJwt({ aud: 'wrong-aud' });
+    const expiredToken = await makeAccessJwt({ expOffsetSec: -60 });
+
+    assert.equal((await request(env, '/api/orders', { noAuth: true })).status, 401);
+    assert.equal((await request(env, '/api/orders', { token: 'not.a.jwt' })).status, 401);
+    assert.equal((await request(env, '/api/orders', { token: wrongAudToken })).status, 401);
+    assert.equal((await request(env, '/api/orders', { token: expiredToken })).status, 401);
+
+    const meAdminRes = await request(env, '/api/me');
+    assert.equal(meAdminRes.status, 200);
+    assert.equal(meAdminRes.data.user.email, 'admin@example.com');
+    assert.equal(meAdminRes.data.user.is_admin, true);
+
+    const meStaffRes = await request(env, '/api/me', { token: staffToken });
+    assert.equal(meStaffRes.status, 200);
+    assert.equal(meStaffRes.data.user.email, 'staff@example.com');
+    assert.equal(meStaffRes.data.user.is_admin, false);
+
+    assert.equal(
+      (
+        await request(env, '/api/orders/clear-all', {
+          method: 'POST',
+          token: staffToken,
+          body: { confirm: 'CLEAR_ALL' },
+        })
+      ).status,
+      403
+    );
+    assert.equal(
+      (
+        await request(env, '/api/settings/payment', {
+          method: 'PUT',
+          token: staffToken,
+          body: { enable_cash: true, enable_qr: true },
+        })
+      ).status,
+      403
+    );
+    assert.equal(
+      (await request(env, '/api/reports/summary', { token: staffToken })).status,
+      403
+    );
+    assert.equal(
+      (
+        await request(env, '/api/categories', {
+          method: 'POST',
+          token: staffToken,
+          body: { name: 'ทดสอบสิทธิ์', sort_order: 99 },
+        })
+      ).status,
+      403
+    );
+
+    assert.equal((await request(env, '/api/orders', { token: staffToken })).status, 200);
+    assert.equal((await request(env, '/api/kitchen', { token: staffToken })).status, 200);
+    assert.equal((await request(env, '/api/catalog', { token: staffToken })).status, 200);
+
+    assert.equal(
+      (
+        await request(env, '/api/orders/clear-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify({ confirm: 'CLEAR_ALL' }),
+        })
+      ).status,
+      415
+    );
+
+    assert.equal(
+      (
+        await request(env, '/api/orders/clear-all', {
+          method: 'POST',
+          headers: { Origin: 'https://evil.example' },
+          body: { confirm: 'CLEAR_ALL' },
+        })
+      ).status,
+      403
+    );
+
+    assert.equal(
+      (
+        await request(env, '/api/orders/clear-all', {
+          method: 'POST',
+          headers: { 'Sec-Fetch-Site': 'cross-site' },
+          body: { confirm: 'CLEAR_ALL' },
+        })
+      ).status,
+      403
+    );
+
+    assert.equal(
+      (await request(env, '/api/reports/summary?from=2024-01-01&to=2026-01-01')).status,
+      400
+    );
+
+    const limitedEnv = {
+      ...env,
+      PUBLIC_ORDER_LIMITER: {
+        limit: async () => ({ success: false }),
+      },
+    };
+    assert.equal(
+      (
+        await request(limitedEnv, '/api/public/orders', {
+          method: 'POST',
+          noAuth: true,
+          body: {
+            order_type: 'takeaway',
+            items: [{ menu_id: water.id, quantity: 1 }],
+          },
+        })
+      ).status,
+      429
+    );
+
+    assert.equal((await request(env, '/api/public/catalog', { noAuth: true })).status, 200);
+    console.log('PASS 16: Security hardening (Access JWT, RBAC, CSRF, query span, rate limit, public bypass) verified');
+
+    console.log('\nALL 16 VERIFICATION CHECKS PASSED!');
   } finally {
+    globalThis.fetch = originalFetch;
+    clearJwksCache();
     await proxy.dispose();
     cleanupState();
   }
