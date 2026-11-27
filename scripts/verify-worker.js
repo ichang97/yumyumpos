@@ -7,6 +7,7 @@ import {
   DEFAULT_SPEECH_RATE,
   buildOrderSpeechText,
   normalizeSpeechRate,
+  pcmBase64ToWavBlob,
   resolveNextOrderToAnnounce,
 } from '../src/utils/kitchenSpeech.js';
 import { buildStationOrders, countActiveByStation } from '../src/utils/kitchenStation.js';
@@ -114,6 +115,9 @@ async function main() {
       use: 'sig',
     };
 
+    const geminiFetchCalls = [];
+    const mockPcmBase64 = Buffer.from(new Uint8Array([0, 0, 1, 0, 2, 0, 3, 0])).toString('base64');
+
     globalThis.fetch = async (input, init) => {
       const targetUrl = typeof input === 'string' ? input : input?.url || '';
       if (targetUrl === `${TEST_TEAM_DOMAIN}/cdn-cgi/access/certs`) {
@@ -121,6 +125,105 @@ async function main() {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
+      }
+      if (targetUrl.startsWith('https://generativelanguage.googleapis.com/v1beta/')) {
+        const headerObj =
+          init?.headers instanceof Headers
+            ? Object.fromEntries(init.headers.entries())
+            : init?.headers || {};
+        const apiKeyHeader = headerObj['x-goog-api-key'] || headerObj['X-Goog-Api-Key'] || '';
+        const parsedBody = init?.body ? JSON.parse(String(init.body)) : null;
+        geminiFetchCalls.push({
+          url: targetUrl,
+          method: init?.method || 'GET',
+          apiKeyHeader,
+          body: parsedBody,
+        });
+
+        if (apiKeyHeader === 'INVALID_GEMINI_KEY_VALUE') {
+          return new Response(JSON.stringify({ error: { code: 400, message: 'API key invalid' } }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+
+        if (targetUrl.includes('/v1beta/models?')) {
+          return new Response(
+            JSON.stringify({
+              models: [
+                {
+                  name: 'models/gemini-2.5-flash',
+                  displayName: 'Gemini 2.5 Flash',
+                  supportedGenerationMethods: ['generateContent'],
+                },
+                {
+                  name: 'models/gemini-2.5-flash-preview-tts',
+                  displayName: 'Gemini 2.5 Flash TTS',
+                  supportedGenerationMethods: ['generateContent'],
+                },
+                {
+                  name: 'models/gemini-2.5-pro-preview-tts',
+                  displayName: 'Gemini 2.5 Pro TTS',
+                  supportedGenerationMethods: ['generateContent'],
+                },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
+
+        if (targetUrl === 'https://generativelanguage.googleapis.com/v1beta/voices') {
+          return new Response(
+            JSON.stringify({
+              voices: [
+                {
+                  name: 'voices/Kore',
+                  displayName: 'Kore',
+                  ssmlGender: 'FEMALE',
+                  languageCodes: ['th-TH', 'en-US'],
+                },
+                {
+                  name: 'voices/Puck',
+                  displayName: 'Puck',
+                  ssmlGender: 'MALE',
+                  languageCodes: ['th-TH', 'en-US'],
+                },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
+
+        if (targetUrl.endsWith(':generateContent')) {
+          return new Response(
+            JSON.stringify({
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        inlineData: {
+                          mimeType: 'audio/L16;codec=pcm;rate=24000',
+                          data: mockPcmBase64,
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }),
+            {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }
+          );
+        }
       }
       return originalFetch(input, init);
     };
@@ -171,6 +274,10 @@ async function main() {
     await applySqlFile(
       env.DB,
       path.resolve(process.cwd(), 'migrations/0006_atomic_daily_counters.sql')
+    );
+    await applySqlFile(
+      env.DB,
+      path.resolve(process.cwd(), 'migrations/0007_speech_settings.sql')
     );
 
     assert.equal(
@@ -1377,7 +1484,258 @@ async function main() {
     assert.equal(postRestoreOrderRes.data.order.queue_no, maxRestoredQueue + 1);
     console.log('PASS 17: Backup JSON export, validation guards, and atomic full restore verified');
 
-    console.log('\nALL 17 VERIFICATION CHECKS PASSED!');
+    const initRuntimeRes = await request(env, '/api/speech/runtime', { token: staffToken });
+    assert.equal(initRuntimeRes.status, 200);
+    assert.equal(initRuntimeRes.data.speech.source, 'web_speech');
+    assert.equal(initRuntimeRes.data.speech.ai_studio_ready, false);
+
+    assert.equal(
+      (await request(env, '/api/settings/speech', { token: staffToken })).status,
+      403
+    );
+    assert.equal(
+      (
+        await request(env, '/api/settings/speech', {
+          method: 'PUT',
+          token: staffToken,
+          body: { source: 'web_speech', rate: 1.15 },
+        })
+      ).status,
+      403
+    );
+    assert.equal(
+      (
+        await request(env, '/api/speech/catalog', {
+          method: 'POST',
+          token: staffToken,
+          body: {},
+        })
+      ).status,
+      403
+    );
+    assert.equal(
+      (
+        await request(env, '/api/speech/preview', {
+          method: 'POST',
+          token: staffToken,
+          body: { text: 'ทดสอบ' },
+        })
+      ).status,
+      403
+    );
+
+    assert.equal(
+      (
+        await request(env, '/api/settings/speech', {
+          method: 'PUT',
+          body: { source: 'ai_studio', rate: 1.15 },
+        })
+      ).status,
+      400
+    );
+    assert.equal(
+      (
+        await request(env, '/api/settings/speech', {
+          method: 'PUT',
+          body: {
+            source: 'web_speech',
+            rate: 1.15,
+            model: '../evil-model',
+          },
+        })
+      ).status,
+      400
+    );
+    assert.equal(
+      (
+        await request(env, '/api/settings/speech', {
+          method: 'PUT',
+          body: {
+            source: 'web_speech',
+            rate: 1.15,
+            temperature: 5.0,
+          },
+        })
+      ).status,
+      400
+    );
+
+    const secretApiKey = 'AIzaSyTestSecretKey_9876543210';
+    const saveSpeechRes = await request(env, '/api/settings/speech', {
+      method: 'PUT',
+      body: {
+        source: 'ai_studio',
+        rate: 1.3,
+        model: 'gemini-2.5-pro-preview-tts',
+        voice: 'Kore',
+        temperature: 0.7,
+        style_prompt: 'พูดภาษาไทยให้ชัดเจน สดใส',
+        api_key: secretApiKey,
+      },
+    });
+    assert.equal(saveSpeechRes.status, 200);
+    assert.equal(saveSpeechRes.data.speech.source, 'ai_studio');
+    assert.equal(saveSpeechRes.data.speech.has_api_key, true);
+    assert.equal(saveSpeechRes.data.speech.api_key_masked, 'AIza••••3210');
+    assert.equal(JSON.stringify(saveSpeechRes.data).includes(secretApiKey), false);
+
+    const adminSpeechGet = await request(env, '/api/settings/speech');
+    assert.equal(adminSpeechGet.status, 200);
+    assert.equal(adminSpeechGet.data.speech.has_api_key, true);
+    assert.equal(JSON.stringify(adminSpeechGet.data).includes(secretApiKey), false);
+
+    const staffRuntimeAfter = await request(env, '/api/speech/runtime', { token: staffToken });
+    assert.equal(staffRuntimeAfter.status, 200);
+    assert.equal(staffRuntimeAfter.data.speech.source, 'ai_studio');
+    assert.equal(staffRuntimeAfter.data.speech.ai_studio_ready, true);
+    assert.equal(staffRuntimeAfter.data.speech.api_key_masked, undefined);
+    assert.equal(JSON.stringify(staffRuntimeAfter.data).includes(secretApiKey), false);
+
+    const publicAfterSpeech = await request(env, '/api/public/catalog', { noAuth: true });
+    assert.equal(publicAfterSpeech.status, 200);
+    assert.equal(JSON.stringify(publicAfterSpeech.data).includes(secretApiKey), false);
+    assert.equal(JSON.stringify(publicAfterSpeech.data).includes('ai_studio_api_key'), false);
+
+    geminiFetchCalls.length = 0;
+    const catalogSpeechRes = await request(env, '/api/speech/catalog', {
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(catalogSpeechRes.status, 200);
+    assert.equal(catalogSpeechRes.data.models.length, 2);
+    assert.equal(
+      catalogSpeechRes.data.models.some((m) => m.id === 'gemini-2.5-flash'),
+      false
+    );
+    assert.equal(catalogSpeechRes.data.voices_source, 'api');
+    assert.equal(catalogSpeechRes.data.voices.length, 2);
+    assert.ok(
+      geminiFetchCalls.every(
+        (call) => call.apiKeyHeader === secretApiKey && !call.url.includes(secretApiKey)
+      )
+    );
+
+    geminiFetchCalls.length = 0;
+    const previewRes = await request(env, '/api/speech/preview', {
+      method: 'POST',
+      body: {
+        text: 'ทดสอบคิวที่ 1',
+        model: 'gemini-2.5-flash-preview-tts',
+        voice: 'Puck',
+        temperature: 1.2,
+        style_prompt: 'พูดสดใส',
+      },
+    });
+    assert.equal(previewRes.status, 200);
+    assert.equal(previewRes.data.audio_base64, mockPcmBase64);
+    assert.equal(previewRes.data.sample_rate, 24000);
+    assert.equal(geminiFetchCalls.length, 1);
+    assert.equal(geminiFetchCalls[0].apiKeyHeader, secretApiKey);
+    assert.equal(geminiFetchCalls[0].url.includes(secretApiKey), false);
+    assert.deepEqual(geminiFetchCalls[0].body.generationConfig.responseModalities, ['AUDIO']);
+    assert.equal(geminiFetchCalls[0].body.generationConfig.temperature, 1.2);
+    assert.equal(
+      geminiFetchCalls[0].body.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName,
+      'Puck'
+    );
+    assert.equal(geminiFetchCalls[0].body.contents[0].parts[0].text, 'ทดสอบคิวที่ 1');
+    assert.equal(geminiFetchCalls[0].body.contents[0].parts[0].speechMetadata.style, 'พูดสดใส');
+
+    const wavBlob = pcmBase64ToWavBlob(previewRes.data.audio_base64, {
+      mimeType: previewRes.data.mime_type,
+      sampleRate: previewRes.data.sample_rate,
+    });
+    assert.equal(wavBlob.type, 'audio/wav');
+    assert.equal(wavBlob.size, 44 + 8);
+
+    geminiFetchCalls.length = 0;
+    const speakRes = await request(env, '/api/speech/speak', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        text: 'คิวที่ 2 ทานที่ร้าน',
+        model: 'gemini-2.5-flash-preview-tts',
+        voice: 'Puck',
+        style_prompt: 'override attempt',
+      },
+    });
+    assert.equal(speakRes.status, 200);
+    assert.equal(speakRes.data.audio_base64, mockPcmBase64);
+    assert.equal(geminiFetchCalls.length, 1);
+    assert.ok(geminiFetchCalls[0].url.includes('gemini-2.5-pro-preview-tts:generateContent'));
+    assert.equal(
+      geminiFetchCalls[0].body.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName,
+      'Kore'
+    );
+    assert.equal(
+      geminiFetchCalls[0].body.contents[0].parts[0].text,
+      'คิวที่ 2 ทานที่ร้าน'
+    );
+    assert.equal(
+      geminiFetchCalls[0].body.contents[0].parts[0].speechMetadata.style,
+      'พูดภาษาไทยให้ชัดเจน สดใส'
+    );
+
+    const exportWithSpeech = await request(env, '/api/backup/export');
+    assert.equal(exportWithSpeech.status, 200);
+    assert.equal(JSON.stringify(exportWithSpeech.data).includes(secretApiKey), false);
+    assert.equal(
+      exportWithSpeech.data.data.shop_settings.some((s) => s.key === 'ai_studio_api_key'),
+      false
+    );
+
+    const injectedKeyBackup = structuredClone(exportWithSpeech.data);
+    injectedKeyBackup.data.shop_settings.push({
+      key: 'ai_studio_api_key',
+      value: 'evil-injected-key',
+      updated_at: '2026-11-24 00:00:00',
+    });
+    assert.equal(
+      (
+        await request(env, '/api/backup/restore', {
+          method: 'POST',
+          body: { confirm: 'RESTORE_BACKUP', backup: injectedKeyBackup },
+        })
+      ).status,
+      400
+    );
+
+    const restoreWithSpeech = await request(env, '/api/backup/restore', {
+      method: 'POST',
+      body: { confirm: 'RESTORE_BACKUP', backup: exportWithSpeech.data },
+    });
+    assert.equal(restoreWithSpeech.status, 200);
+
+    const speechAfterRestore = await request(env, '/api/settings/speech');
+    assert.equal(speechAfterRestore.status, 200);
+    assert.equal(speechAfterRestore.data.speech.has_api_key, true);
+    assert.equal(speechAfterRestore.data.speech.api_key_masked, 'AIza••••3210');
+
+    const clearKeyRes = await request(env, '/api/settings/speech', {
+      method: 'PUT',
+      body: {
+        source: 'web_speech',
+        rate: 1.15,
+        clear_api_key: true,
+      },
+    });
+    assert.equal(clearKeyRes.status, 200);
+    assert.equal(clearKeyRes.data.speech.has_api_key, false);
+    assert.equal(clearKeyRes.data.speech.api_key_masked, '');
+    assert.equal(
+      (
+        await request(env, '/api/speech/speak', {
+          method: 'POST',
+          token: staffToken,
+          body: { text: 'คิวที่ 3' },
+        })
+      ).status,
+      400
+    );
+
+    console.log('PASS 18: Admin speech settings, Gemini TTS catalog/preview/speak, API key protection & backup preservation verified');
+
+    console.log('\nALL 18 VERIFICATION CHECKS PASSED!');
   } finally {
     globalThis.fetch = originalFetch;
     clearJwksCache();
