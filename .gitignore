@@ -5,4 +5,5 @@ data/*.sqlite-wal
 data/*.sqlite-shm
 .wrangler/
 .dev.vars
+.env
 .DS_Store

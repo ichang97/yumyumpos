@@ -1,0 +1,23 @@
+services:
+  yumyum-pos:
+    build: .
+    container_name: yumyum-pos
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8787}:8787"
+    environment:
+      PORT: "8787"
+      HOST: "0.0.0.0"
+      DB_PATH: "${DB_PATH:-/app/data/yumyum-pos.sqlite}"
+      LOCAL_AUTH_MODE: "${LOCAL_AUTH_MODE:-off}"
+      LOCAL_USER_EMAIL: "${LOCAL_USER_EMAIL:-local@yumyum.pos}"
+      LOCAL_USER_ADMIN: "${LOCAL_USER_ADMIN:-true}"
+      ADMIN_EMAILS: "${ADMIN_EMAILS:-}"
+      ACCESS_TEAM_DOMAIN: "${ACCESS_TEAM_DOMAIN:-}"
+      ACCESS_AUD: "${ACCESS_AUD:-}"
+      TRUST_PROXY: "${TRUST_PROXY:-true}"
+    volumes:
+      - yumyum_data:/app/data
+
+volumes:
+  yumyum_data:

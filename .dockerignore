@@ -1,0 +1,14 @@
+node_modules
+.npm
+.git
+.wrangler
+.dev.vars
+.env
+.DS_Store
+dist
+coverage
+data
+plans
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

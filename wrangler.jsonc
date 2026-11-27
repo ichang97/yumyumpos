@@ -16,6 +16,7 @@
     "ACCESS_AUD": "d4359175dc935a7ae0f6a54c43c3572d348669b30f8ce45cb8ee4c805e4de1e8"
   },
   "assets": {
+    "directory": "./dist/client",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
