@@ -115,6 +115,17 @@ export const api = {
   updatePaymentSettings: (payload) =>
     apiFetch('/settings/payment', { method: 'PUT', body: payload }),
 
+  getSpeechRuntime: () => apiFetch('/speech/runtime'),
+  getSpeechSettings: () => apiFetch('/settings/speech'),
+  updateSpeechSettings: (payload) =>
+    apiFetch('/settings/speech', { method: 'PUT', body: payload }),
+  getSpeechCatalog: (payload = {}) =>
+    apiFetch('/speech/catalog', { method: 'POST', body: payload }),
+  previewSpeech: (payload, signal) =>
+    apiFetch('/speech/preview', { method: 'POST', body: payload, signal }),
+  speakWithAiStudio: (text, signal) =>
+    apiFetch('/speech/speak', { method: 'POST', body: { text }, signal }),
+
   exportBackup: () => apiFetch('/backup/export'),
   restoreBackup: (backup) =>
     apiFetch('/backup/restore', {

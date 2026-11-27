@@ -20,9 +20,11 @@ import {
   Trash2,
   Upload,
   UtensilsCrossed,
+  Volume2,
   X,
 } from 'lucide-vue-next';
 import { api } from '../api/client.js';
+import AdminSpeechSettings from '../components/AdminSpeechSettings.vue';
 import { formatBaht, getBangkokDateStr, shiftDateStr } from '../utils/format.js';
 import { buildPromptPayPayload, isValidPromptPayId } from '../utils/promptpay.js';
 import { prepareQrImageDataUrl } from '../utils/qrImage.js';
@@ -766,6 +768,20 @@ async function confirmRestoreBackup() {
           type="button"
           class="min-h-11 px-4 rounded-xl text-sm font-bold whitespace-nowrap flex items-center gap-2 transition shrink-0"
           :class="
+            adminTab === 'speech'
+              ? 'bg-stone-900 text-white'
+              : 'bg-white border border-stone-200 text-stone-700 hover:bg-stone-50'
+          "
+          @click="adminTab = 'speech'"
+        >
+          <Volume2 class="w-4 h-4" />
+          <span>เสียงอ่านคิว</span>
+        </button>
+
+        <button
+          type="button"
+          class="min-h-11 px-4 rounded-xl text-sm font-bold whitespace-nowrap flex items-center gap-2 transition shrink-0"
+          :class="
             adminTab === 'reports'
               ? 'bg-stone-900 text-white'
               : 'bg-white border border-stone-200 text-stone-700 hover:bg-stone-50'
@@ -1292,6 +1308,10 @@ async function confirmRestoreBackup() {
             <span>ล้างบิลและคิวทั้งหมด</span>
           </button>
         </div>
+      </section>
+
+      <section v-else-if="adminTab === 'speech'">
+        <AdminSpeechSettings @notify="emit('notify', $event)" />
       </section>
 
       <section v-else-if="adminTab === 'reports'" class="space-y-4">

@@ -16,6 +16,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-vue-next';
+import { api } from '../api/client.js';
 import {
   formatBaht,
   formatQueueNo,
@@ -27,10 +28,11 @@ import {
   DEFAULT_SPEECH_RATE,
   SPEECH_RATE_OPTIONS,
   buildOrderSpeechText,
+  clearSpeechAudioCache,
   isSpeechSupported,
   normalizeSpeechRate,
   resolveNextOrderToAnnounce,
-  speakThai,
+  speakOrderAudio,
   stopSpeech,
 } from '../utils/kitchenSpeech.js';
 import {
@@ -41,6 +43,14 @@ import {
 
 const SPEECH_RATE_STORAGE_KEY = 'yumyum_kitchen_speech_rate';
 const STATION_STORAGE_KEY = 'yumyum_kitchen_station';
+
+function hasSavedSpeechRate() {
+  try {
+    return Boolean(localStorage.getItem(SPEECH_RATE_STORAGE_KEY));
+  } catch {
+    return false;
+  }
+}
 
 function loadSavedSpeechRate() {
   try {
@@ -88,8 +98,19 @@ const mobileColumn = ref('pending');
 const selectedStation = ref(loadSavedStation());
 const soundEnabled = ref(false);
 const speechRate = ref(loadSavedSpeechRate());
+const speechRuntime = ref({
+  source: 'web_speech',
+  rate: DEFAULT_SPEECH_RATE,
+  ai_studio_ready: false,
+});
 const nowMs = ref(Date.now());
 const speechSupported = isSpeechSupported();
+const effectiveSpeechSource = computed(() =>
+  speechRuntime.value.source === 'ai_studio' && speechRuntime.value.ai_studio_ready
+    ? 'ai_studio'
+    : 'web_speech'
+);
+const canSpeak = computed(() => effectiveSpeechSource.value === 'ai_studio' || speechSupported);
 const speakingOrderId = ref(null);
 const speakingQueueNo = ref(null);
 const prevStatusById = ref(new Map());
@@ -145,6 +166,27 @@ function playChime() {
   }
 }
 
+async function loadSpeechRuntime() {
+  try {
+    const res = await api.getSpeechRuntime();
+    if (res?.speech) {
+      speechRuntime.value = {
+        source: res.speech.source === 'ai_studio' ? 'ai_studio' : 'web_speech',
+        rate: normalizeSpeechRate(res.speech.rate),
+        ai_studio_ready: Boolean(res.speech.ai_studio_ready),
+      };
+      if (!hasSavedSpeechRate()) {
+        speechRate.value = speechRuntime.value.rate;
+      }
+    }
+  } catch {
+  }
+}
+
+function fetchOrderSpeechAudio(text, signal) {
+  return api.speakWithAiStudio(text, signal);
+}
+
 function announceOrder(order, { withChime = false } = {}) {
   if (!order) {
     return;
@@ -154,8 +196,14 @@ function announceOrder(order, { withChime = false } = {}) {
   const speechText = buildOrderSpeechText(order);
 
   const runSpeak = () => {
-    const started = speakThai(speechText, {
+    const started = speakOrderAudio(speechText, {
+      source: effectiveSpeechSource.value,
       rate: speechRate.value,
+      fetchAudio: fetchOrderSpeechAudio,
+      onLoading: () => {
+        speakingOrderId.value = order.id;
+        speakingQueueNo.value = order.queue_no;
+      },
       onStart: () => {
         speakingOrderId.value = order.id;
         speakingQueueNo.value = order.queue_no;
@@ -175,7 +223,7 @@ function announceOrder(order, { withChime = false } = {}) {
 
   if (withChime) {
     playChime();
-    if (speechSupported && speechText) {
+    if (canSpeak.value && speechText) {
       speakDelayTimer = setTimeout(() => {
         speakDelayTimer = null;
         runSpeak();
@@ -194,8 +242,12 @@ function handleSpeechRateChange(event) {
     localStorage.setItem(SPEECH_RATE_STORAGE_KEY, String(nextRate));
   } catch {
   }
-  if (speechSupported && soundEnabled.value) {
-    speakThai(`ความเร็ว ${nextRate} เท่า`, { rate: nextRate });
+  if (canSpeak.value && soundEnabled.value) {
+    speakOrderAudio(`ความเร็ว ${nextRate} เท่า`, {
+      source: effectiveSpeechSource.value,
+      rate: nextRate,
+      fetchAudio: fetchOrderSpeechAudio,
+    });
   }
 }
 
@@ -203,8 +255,12 @@ function toggleSound() {
   soundEnabled.value = !soundEnabled.value;
   if (soundEnabled.value) {
     playChime();
-    if (speechSupported) {
-      speakThai('เปิดเสียงอ่านคิวแล้ว', { rate: speechRate.value });
+    if (canSpeak.value) {
+      speakOrderAudio('เปิดเสียงอ่านคิวแล้ว', {
+        source: effectiveSpeechSource.value,
+        rate: speechRate.value,
+        fetchAudio: fetchOrderSpeechAudio,
+      });
     }
   } else {
     handleStopSpeech();
@@ -358,8 +414,14 @@ watch(
   { immediate: true }
 );
 
+function handleManualRefresh() {
+  emit('refresh');
+  loadSpeechRuntime();
+}
+
 onMounted(() => {
   emit('refresh');
+  loadSpeechRuntime();
   clockTimer = setInterval(() => {
     nowMs.value = Date.now();
   }, 15000);
@@ -370,6 +432,7 @@ onUnmounted(() => {
     clearInterval(clockTimer);
   }
   handleStopSpeech();
+  clearSpeechAudioCache();
 });
 
 const columns = computed(() => [
@@ -432,7 +495,7 @@ const columns = computed(() => [
         </button>
 
         <select
-          v-if="speechSupported"
+          v-if="canSpeak"
           :value="speechRate"
           aria-label="ความเร็วเสียงอ่านคิว"
           class="min-h-9 px-2.5 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-xs font-bold tabular-nums focus:outline-none focus:ring-2 focus:ring-brand"
@@ -447,7 +510,7 @@ const columns = computed(() => [
           type="button"
           class="min-h-9 px-3 rounded-xl border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-xs font-bold flex items-center gap-1.5"
           :disabled="loading"
-          @click="$emit('refresh')"
+          @click="handleManualRefresh"
         >
           <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': loading }" />
           <span>รีเฟรช</span>
