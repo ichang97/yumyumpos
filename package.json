@@ -3,17 +3,25 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview --host",
     "deploy": "vite build && wrangler deploy",
+    "dev:local": "node local/dev.js",
+    "build:local": "YUMYUM_LOCAL=1 vite build",
+    "start:local": "node local/server.js",
+    "test:local": "node scripts/verify-local.js",
     "db:migrate:local": "wrangler d1 migrations apply yumyum-pos-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply yumyum-pos-db --remote",
     "test": "node scripts/verify-worker.js"
   },
   "dependencies": {
     "@fontsource/noto-sans-thai": "^5.2.5",
+    "@hono/node-server": "^2.1.11",
     "hono": "^4.7.0",
     "lucide-vue-next": "^0.475.0",
     "qrcode": "^1.5.4",
