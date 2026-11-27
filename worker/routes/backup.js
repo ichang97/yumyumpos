@@ -4,6 +4,16 @@ import { prepareStmt, queryAll } from '../lib/db.js';
 import { getBangkokNow } from '../lib/time.js';
 import { HttpError, parseJsonBody } from '../lib/validate.js';
 import { parseQrImageDataUrl } from './settings.js';
+import {
+  AI_STUDIO_API_KEY_SETTING,
+  SPEECH_PUBLIC_SETTING_KEYS,
+  normalizeSpeechSource,
+  validateModelId,
+  validateSpeechRate,
+  validateStylePrompt,
+  validateTemperature,
+  validateVoiceName,
+} from './speech.js';
 
 const BACKUP_APP = 'yumyum-pos';
 const BACKUP_VERSION = 1;
@@ -14,6 +24,7 @@ const SETTING_KEYS = [
   'promptpay_id',
   'promptpay_name',
   'qr_image_data',
+  ...SPEECH_PUBLIC_SETTING_KEYS,
 ];
 const ALLOWED_SETTING_KEYS = new Set(SETTING_KEYS);
 const SELECTION_TYPES = new Set(['single', 'multiple']);
@@ -377,6 +388,27 @@ function normalizeShopSettings(rawList, now) {
     });
   }
 
+  const speechNormalizers = {
+    speech_source: (val) => normalizeSpeechSource(val, true),
+    speech_rate: (val) => String(validateSpeechRate(val, true)),
+    ai_studio_model: (val) => validateModelId(val, true),
+    ai_studio_voice: (val) => validateVoiceName(val, true),
+    ai_studio_temperature: (val) => String(validateTemperature(val, true)),
+    ai_studio_style_prompt: (val) => validateStylePrompt(val),
+  };
+
+  for (const key of SPEECH_PUBLIC_SETTING_KEYS) {
+    const entry = byKey.get(key);
+    if (!entry) {
+      continue;
+    }
+    normalized.push({
+      key,
+      value: speechNormalizers[key](entry.value),
+      updated_at: entry.updated_at,
+    });
+  }
+
   return normalized;
 }
 
@@ -602,7 +634,7 @@ export function createBackupRoutes() {
       ),
       queryAll(
         db,
-        'SELECT key, value, updated_at FROM shop_settings WHERE key IN (?, ?, ?, ?, ?) ORDER BY key ASC',
+        `SELECT key, value, updated_at FROM shop_settings WHERE key IN (${SETTING_KEYS.map(() => '?').join(', ')}) ORDER BY key ASC`,
         SETTING_KEYS
       ),
       queryAll(
@@ -711,7 +743,7 @@ export function createBackupRoutes() {
       prepareStmt(db, 'DELETE FROM menus'),
       prepareStmt(db, 'DELETE FROM option_groups'),
       prepareStmt(db, 'DELETE FROM categories'),
-      prepareStmt(db, 'DELETE FROM shop_settings'),
+      prepareStmt(db, 'DELETE FROM shop_settings WHERE key != ?', [AI_STUDIO_API_KEY_SETTING]),
     ];
 
     for (const row of categories) {
