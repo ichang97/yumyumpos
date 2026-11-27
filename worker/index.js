@@ -10,8 +10,35 @@ import { createOrdersRoutes } from './routes/orders.js';
 import { createPublicRoutes } from './routes/public.js';
 import { createReportsRoutes } from './routes/reports.js';
 import { createSettingsRoutes } from './routes/settings.js';
+import { createSpeechRoutes } from './routes/speech.js';
 
 export const app = new Hono();
+
+function resolveExpectedOrigin(c) {
+  const url = new URL(c.req.url);
+  if (String(c.env?.TRUST_PROXY || '').toLowerCase() !== 'true') {
+    return url.origin;
+  }
+
+  const rawProto = String(c.req.header('x-forwarded-proto') || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const proto =
+    rawProto === 'http' || rawProto === 'https' ? rawProto : url.protocol.replace(':', '');
+
+  const rawHost = String(c.req.header('x-forwarded-host') || '')
+    .split(',')[0]
+    .trim();
+  if (rawHost && !/[\s/?#@\\]/.test(rawHost)) {
+    try {
+      return new URL(`${proto}://${rawHost}`).origin;
+    } catch {
+    }
+  }
+
+  return new URL(`${proto}://${url.host}`).origin;
+}
 
 app.use(
   '*',
@@ -22,6 +49,7 @@ app.use(
       styleSrc: ["'self'"],
       imgSrc: ["'self'", 'data:'],
       fontSrc: ["'self'", 'data:'],
+      mediaSrc: ["'self'", 'blob:'],
       connectSrc: ["'self'"],
       frameAncestors: ["'none'"],
       baseUri: ["'self'"],
@@ -46,7 +74,7 @@ app.use('/api/*', async (c, next) => {
       } catch {
         throw new HttpError(403, 'คำขอข้ามโดเมนไม่ได้รับอนุญาต');
       }
-      if (parsedOrigin !== new URL(c.req.url).origin) {
+      if (parsedOrigin !== resolveExpectedOrigin(c)) {
         throw new HttpError(403, 'คำขอข้ามโดเมนไม่ได้รับอนุญาต');
       }
     }
@@ -90,6 +118,7 @@ app.route('/api', createCatalogRoutes());
 app.route('/api', createOrdersRoutes());
 app.route('/api', createReportsRoutes());
 app.route('/api', createSettingsRoutes());
+app.route('/api', createSpeechRoutes());
 
 app.all('/api/*', (c) =>
   c.json({ error: 'ไม่พบ API endpoint ที่เรียกใช้งาน' }, 404)

@@ -75,6 +75,29 @@ export async function requireAccessAuth(c, next) {
 
   const teamDomain = String(c.env?.ACCESS_TEAM_DOMAIN || '').trim().replace(/\/+$/, '');
   const expectedAud = String(c.env?.ACCESS_AUD || '').trim();
+
+  if (
+    !token &&
+    !teamDomain &&
+    !expectedAud &&
+    String(c.env?.LOCAL_AUTH_MODE || '').toLowerCase() === 'off'
+  ) {
+    const email =
+      String(c.env?.LOCAL_USER_EMAIL || 'local@yumyum.pos').trim().toLowerCase() ||
+      'local@yumyum.pos';
+    const adminSet = getAdminEmailSet(c.env?.ADMIN_EMAILS);
+    const isAdmin =
+      adminSet.size > 0
+        ? adminSet.has(email)
+        : String(c.env?.LOCAL_USER_ADMIN ?? 'true').toLowerCase() !== 'false';
+    c.set('authUser', {
+      email,
+      is_admin: isAdmin,
+    });
+    await next();
+    return;
+  }
+
   if (!teamDomain || !expectedAud) {
     throw new HttpError(401, 'ระบบยืนยันตัวตนยังไม่ได้ตั้งค่าครบถ้วน');
   }
