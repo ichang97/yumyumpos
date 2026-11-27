@@ -83,3 +83,35 @@
 npm run db:migrate:remote
 npm run deploy
 ```
+
+---
+
+## การรันแบบ Local และ Docker (ไม่ต้องใช้ D1)
+
+โหมด Local / Docker ใช้ Node.js (`>= 22.12.0`) ร่วมกับ SQLite ไฟล์เดียว (`node:sqlite`) และรัน `migrations/*.sql` อัตโนมัติตอนสตาร์ท โดยไม่ต้องใช้ Wrangler หรือ Cloudflare D1
+
+### 1. รันบนเครื่องตรง ๆ (ไม่พึ่ง D1)
+
+```bash
+npm install
+npm run dev:local
+```
+
+หรือทดสอบ build และรันชุดทดสอบของโหมด Local:
+
+```bash
+npm run build:local
+npm run test:local
+npm run start:local
+```
+
+### 2. รันด้วย Docker / Docker Compose
+
+```bash
+docker compose up -d --build
+```
+
+- เข้าใช้งานได้ที่ `http://localhost:8787` (และหน้าลูกค้า `/order`)
+- ข้อมูลทั้งหมดจะถูกเก็บถาวรใน Docker volume `yumyum_data` (`/app/data/yumyum-pos.sqlite`)
+- ค่าเริ่มต้นจะปิด Cloudflare Access (`LOCAL_AUTH_MODE=off`) เพื่อให้ใช้งานในร้านหรือวง LAN ได้ทันที และรองรับการวางหลัง Reverse Proxy (`TRUST_PROXY=true`)
+- สามารถคัดลอก `.env.example` เป็น `.env` เพื่อปรับแต่งค่า หรือใส่ `ACCESS_TEAM_DOMAIN` และ `ACCESS_AUD` หากต้องการเปิดตรวจ Cloudflare Access JWT บน Docker
